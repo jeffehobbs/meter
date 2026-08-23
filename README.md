@@ -24,6 +24,19 @@ Eurorack drum module or a hardware box can be the voice instead.
 ./Tools/check.sh      headless checks: the budget, the director, the rack
 ```
 
+```
+git clone https://github.com/jeffehobbs/meter
+git clone https://github.com/jeffehobbs/cadence   # sibling, needed by the iOS target
+```
+
+The iOS app depends on [cadence](https://github.com/jeffehobbs/cadence) by path
+rather than by URL, so the two want to sit next to each other. The macOS app does
+not need it, but `xcodegen` generates both targets at once — so without the
+sibling checkout, nothing generates.
+
+A signed and notarized macOS build is on the
+[releases page](https://github.com/jeffehobbs/meter/releases).
+
 There are two apps. The Mac one is an instrument; **Meter Flow**, on iOS, is the
 same machine with nothing to operate — see [Meter Flow](#meter-flow-ios) below.
 `Sources/Shared` is shared between them verbatim: the budget, the director, the
