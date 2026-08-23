@@ -1,0 +1,125 @@
+name: Meter
+options:
+  bundleIdPrefix: com.jeffhobbs
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    DEVELOPMENT_TEAM: YKF353373Y
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "5.9"
+    MARKETING_VERSION: "1.0.0"
+    CURRENT_PROJECT_VERSION: "1"
+    # Universal: Apple Silicon and Intel.
+    ARCHS: "$(ARCHS_STANDARD)"
+  configs:
+    # Debug builds only this machine's slice so iterating stays quick; anything
+    # shipped is built for both.
+    Debug:
+      ONLY_ACTIVE_ARCH: "YES"
+    Release:
+      ONLY_ACTIVE_ARCH: "NO"
+packages:
+  # The heart-rate library, developed alongside this app and meant for the other
+  # iOS apps too — hence a package on disk rather than a folder in here.
+  Cadence:
+    path: ../cadence
+
+targets:
+  Meter:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/Shared
+      - Sources/Mac
+      # Flat in the bundle's Resources, so Bundle.main.url(forResource:) finds
+      # it without a subdirectory: a folder reference would nest it.
+      - path: Resources/patterns.json
+        buildPhase: resources
+      - path: Assets.xcassets
+        optional: true
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleDisplayName: Meter
+        CFBundleIconFile: AppIcon
+        # Both keys are needed. Xcode injects them when it writes the plist
+        # itself, but this target supplies its own, and without CFBundleIconName
+        # the asset-catalog icon compiles fine and then never reaches the Dock.
+        CFBundleIconName: AppIcon
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.music
+        LSMinimumSystemVersion: "14.0"
+        NSHumanReadableCopyright: "Jeff Hobbs"
+        # A drum machine that is asked to quit mid-measure should be allowed to
+        # send its note-offs first.
+        NSSupportsSuddenTermination: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.meter
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ENABLE_HARDENED_RUNTIME: YES
+        # Not sandboxed, and deliberately so: Meter opens CoreMIDI endpoints and
+        # an audio output unit — neither is a restricted resource — and its only
+        # persisted state is UserDefaults. The sandbox would buy nothing for
+        # Developer ID distribution and gets in the way of talking to a
+        # class-compliant USB drum machine.
+
+  # Meter Flow — the iOS build. The same machine, playing itself.
+  #
+  # `Sources/Shared` is shared verbatim rather than forked: the budget, the
+  # director, the composer, the rack and the transport are all platform-neutral,
+  # and the only thing iOS needs of its own is the audio session, the lock-screen
+  # controls and one screen. `Sources/Mac` — the grid, the rack panel, the
+  # nine-lane control surface — stays out, because the point of this build is
+  # that there is nothing to operate.
+  MeterFlow:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - Sources/Shared
+      - Sources/iOS
+      - path: Resources/patterns.json
+        buildPhase: resources
+      - path: Sources/iOS/Assets.xcassets
+        optional: true
+      - path: Sources/iOS/PrivacyInfo.xcprivacy
+        buildPhase: resources
+    dependencies:
+      - package: Cadence
+    info:
+      path: Sources/iOS/Info.plist
+      properties:
+        CFBundleDisplayName: Meter
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.music
+        # The premise of the whole build: keep playing with the screen off.
+        UIBackgroundModes: [audio]
+        # CoreMotion, for the tempo. Worded for someone who has no idea why a
+        # drum machine wants to know they are walking.
+        NSMotionUsageDescription: Meter uses your movement — steps, pace, climbing — to estimate your heart rate, so the tempo can settle where your pulse is. It stays on this device.
+        NSHealthShareUsageDescription: Meter reads your heart rate and resting heart rate so the tempo can follow your pulse, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.
+        ITSAppUsesNonExemptEncryption: false
+        UILaunchScreen:
+          UIColorName: ""
+        UIStatusBarHidden: false
+        UISupportedInterfaceOrientations~iphone:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jeffhobbs.meterflow
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Sources/iOS/MeterFlow.entitlements
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: "1"

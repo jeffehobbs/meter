@@ -1,0 +1,8 @@
+build/
+build-ios/
+build-device/
+dist/
+Meter.xcodeproj/
+*.xcworkspace
+.DS_Store
+*.wav
