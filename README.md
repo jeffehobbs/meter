@@ -67,7 +67,7 @@ flams; the lane starts double-striking instead of overflowing.
 
 The placement prior comes from 214 transcribed drum-machine patterns (Stephen
 Handley's transcription of the *260 Drum Machine Patterns* book — the same corpus
-[Phonotropic](../phonotropic_003) sequenced literally). Meter never plays those
+Phonotropic sequenced literally). Meter never plays those
 patterns. It reads them as statistics: for each lane, at each density, how likely
 is a hit on each step. Density matters more than it looks — two kicks in a bar
 and nine kicks in a bar do not go in scaled-up versions of the same places — so
@@ -96,7 +96,7 @@ sixteen steps.
 
 ### Why it never settles
 
-Two rules are inherited from [Thrum](../Thrum)'s Flow director, and they are the
+Two rules are inherited from [Thrum](https://github.com/jeffehobbs/thrum)'s Flow director, and they are the
 difference between this and a randomizer:
 
 - **Nothing is ever set, only ramped.** A share that jumps between two measures
@@ -106,7 +106,7 @@ difference between this and a randomizer:
 - **Every gesture runs on its own prime clock.** Transfers every 5 measures,
   tilts every 7, spotlights every 11, dropouts every 13, placement churn every
   17, on-beat/off-beat shifts every 19, repatching every 29. Nothing lines up, so
-  nothing is ever a section. (The prime idea comes from [Echo](../Echo), where
+  nothing is ever a section. (The prime idea comes from [Echo](https://github.com/jeffehobbs/echo), where
   every phrase recurs on a prime number of beats.)
 
 ### What drifts
@@ -341,7 +341,7 @@ spent, and the lamp goes round once a bar. The knob is density. Everything else 
 which lanes, which patches, when to reallocate — the director was already
 deciding on its own, so on a phone it simply gets on with it.
 
-**Tempo follows your pulse**, through [Cadence](../cadence), a package built
+**Tempo follows your pulse**, through [Cadence](https://github.com/jeffehobbs/cadence), a package built
 alongside this app and meant for the other iOS apps too. A phone has no
 heart-rate sensor and most listening happens with no watch on, so Cadence uses a
 real measurement when there is one and extrapolates from pace, movement,
