@@ -26,6 +26,8 @@
 	<string>public.app-category.music</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Meter reads your heart rate and resting heart rate so the tempo can follow your pulse, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Meter does not save anything to Health. It only reads your heart rate, so the tempo can follow your pulse — nothing is ever written back.</string>
 	<key>NSMotionUsageDescription</key>
 	<string>Meter uses your movement — steps, pace, climbing — to estimate your heart rate, so the tempo can settle where your pulse is. It stays on this device.</string>
 	<key>UIBackgroundModes</key>

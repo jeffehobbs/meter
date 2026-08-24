@@ -103,6 +103,12 @@ targets:
         # drum machine wants to know they are walking.
         NSMotionUsageDescription: Meter uses your movement — steps, pace, climbing — to estimate your heart rate, so the tempo can settle where your pulse is. It stays on this device.
         NSHealthShareUsageDescription: Meter reads your heart rate and resting heart rate so the tempo can follow your pulse, and uses those readings to tune its own estimate to you. Nothing is written to Health and nothing leaves this device.
+        # Required even though this app never writes to Health, and the App Store
+        # rejects the build without it (ITMS-90683): the check is on the
+        # *entitlement*, which permits writing, not on whether any write exists in
+        # the code. The string still has to be true and user-facing, so it says
+        # what actually happens.
+        NSHealthUpdateUsageDescription: Meter does not save anything to Health. It only reads your heart rate, so the tempo can follow your pulse — nothing is ever written back.
         ITSAppUsesNonExemptEncryption: false
         UILaunchScreen:
           UIColorName: ""
