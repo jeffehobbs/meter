@@ -164,10 +164,18 @@ resolve_asc_password() {
 #     ASC_APPLE_ID      your Apple ID email
 #     ASC_APP_PASSWORD  abcd-efgh-ijkl-mnop     (or store it, see above)
 #
-#   Or an API key:
-#     ASC_KEY_ID        the key's ID
-#     ASC_ISSUER_ID     the issuer UUID from the Keys page
-#   with the .p8 in ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8
+#   Or an API key, which is what this prefers because it needs nothing exported:
+#   drop the .p8 at ~/.appstoreconnect/private_keys/AuthKey_<KEYID>.p8 — the key
+#   ID is read from the filename — and put the issuer UUID from the Keys page in
+#   ~/.appstoreconnect/issuer_id. The issuer is per account rather than per key
+#   and is not a secret; the .p8 is, and stays 0600. ASC_KEY_ID / ASC_ISSUER_ID
+#   still override both.
+#
+# An API key does **not** let this create the App Store Connect app record. Apple
+# is explicit: POST /v1/apps returns 403, "The resource 'apps' does not allow
+# 'CREATE'. Allowed operations are: GET_COLLECTION, GET_INSTANCE, UPDATE". The
+# record has to be made in the web UI once, per app, by hand — the *App ID* being
+# registered is a different thing and is not enough.
 #
 # The build number can be overridden: `./build.sh testflight 42`. App Store
 # Connect rejects a number it has already seen, and rejects it *after* the upload
@@ -247,19 +255,32 @@ PLIST
   # with an alpha channel, an entitlement the profile cannot carry, a missing app
   # record — in about a minute, against finding out by email a quarter of an hour
   # after uploading.
+  # An API key first, because it needs nothing exported: the key ID is in the
+  # filename and the issuer — which is per account, not per key, and is not
+  # secret — sits next to it. The .p8 is the secret and stays 0600 where Apple's
+  # tools already look for it. Falls back to the app-specific password.
   AUTH=()
   ASC_APPLE_ID="${ASC_APPLE_ID:-}"
   ASC_PW="$(resolve_asc_password || true)"
-  if [[ -n "$ASC_APPLE_ID" && -n "$ASC_PW" ]]; then
+  if [[ -z "${ASC_KEY_ID:-}" ]]; then
+    KEYFILE=$(ls ~/.appstoreconnect/private_keys/AuthKey_*.p8 2>/dev/null | head -1)
+    if [[ -n "$KEYFILE" ]]; then
+      ASC_KEY_ID=$(basename "$KEYFILE" .p8); ASC_KEY_ID="${ASC_KEY_ID#AuthKey_}"
+    fi
+  fi
+  if [[ -z "${ASC_ISSUER_ID:-}" && -f ~/.appstoreconnect/issuer_id ]]; then
+    ASC_ISSUER_ID=$(tr -d '[:space:]' < ~/.appstoreconnect/issuer_id)
+  fi
+  if [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
+    AUTH=(--apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID")
+    echo "▸ Using the App Store Connect API key $ASC_KEY_ID."
+  elif [[ -n "$ASC_APPLE_ID" && -n "$ASC_PW" ]]; then
     AUTH=(-u "$ASC_APPLE_ID" -p "$ASC_PW")
     if [[ "$ASC_PW" == @keychain:* ]]; then
       echo "▸ Using the app-specific password in the keychain (${ASC_PW#@keychain:}) for $ASC_APPLE_ID."
     else
       echo "▸ Using the app-specific password from the environment for $ASC_APPLE_ID."
     fi
-  elif [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
-    AUTH=(--apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID")
-    echo "▸ Using the App Store Connect API key $ASC_KEY_ID."
   fi
 
   if (( ${#AUTH[@]} )); then
