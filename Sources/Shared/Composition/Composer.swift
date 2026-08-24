@@ -22,6 +22,29 @@ final class Composer {
     var persistence: Double = 0.72
     /// Depth of the dynamics, 0 flat … 1 full.
     var accent: Double = 0.7
+    /// Lanes phase against the bar instead of repeating with it — see
+    /// `MeterMotion.rotate` and `Self.drift`.
+    var rotates = false
+
+    /// How far each lane's figure slides per bar when `rotates` is on, in steps.
+    ///
+    /// A lane whose figure is a step shorter than the bar arrives a step later
+    /// every bar, which is all a polymetric cycle is. Expressing it as a per-bar
+    /// slide rather than as a cycle length is what lets it sit inside the
+    /// existing inherit-from-last-measure machinery instead of beside it.
+    ///
+    /// The two lanes that hold the bar together are not in here on purpose. The
+    /// bass and the snare are what tell you where one is, and a kit in which
+    /// nothing is where one is does not sound polymetric, it sounds broken.
+    /// Distinct and small: distinct so no two lanes stay locked to each other,
+    /// small because what is heard is not the size of the slide but the number of
+    /// bars it takes to come back around, and every one of these is coprime
+    /// enough with a bar to take a while.
+    private static let drift: [DrumVoice: Int] = [
+        .bass: 0, .snare: 0, .rim: -1,
+        .lowTom: -2, .midTom: 2, .highTom: -3,
+        .closedHat: 1, .openHat: 3, .cymbal: 4,
+    ]
 
     /// What each lane played last measure, so a measure can be an edit of the
     /// one before rather than a fresh roll.
@@ -50,6 +73,32 @@ final class Composer {
 
     func reset() {
         previous.removeAll()
+    }
+
+    /// Carry every lane's figure onto a new grid instead of throwing it away.
+    ///
+    /// Changing the meter used to call `reset()`, and that was the single most
+    /// disruptive thing about a meter change — worse than the new bar length. It
+    /// meant nine lanes re-rolled on the same downbeat, when the director's own
+    /// churn gesture deliberately touches one or two lanes every seventeen bars.
+    /// The new bar arrived as new music rather than as the same music in a
+    /// differently-shaped bar.
+    ///
+    /// Mapping is by tick, which is the one rule that covers both kinds of move:
+    /// across a subdivision pivot the tick is what has to survive, and across a
+    /// bar-length change preserving the tick preserves the step index, because
+    /// the step is the same length on both sides. What falls off the end of a
+    /// shorter bar is dropped; a longer bar keeps the whole figure and leaves the
+    /// new tail empty for the fill to find.
+    func remap(from old: Signature, to new: Signature) {
+        guard old.steps != new.steps || old.ticksPerStep != new.ticksPerStep else { return }
+        for (voice, steps) in previous {
+            var moved = Set<Int>()
+            for step in steps.sorted() {
+                if let mapped = new.step(matching: step, in: old) { moved.insert(mapped) }
+            }
+            previous[voice] = moved
+        }
     }
 
     // MARK: - Composing
@@ -133,11 +182,20 @@ final class Composer {
             var chosen = Set<Int>()
             // Inherit from last measure unless the director asked for a churn.
             if !tick.reseed.contains(voice), let last = previous[voice] {
+                // Slid along by this lane's own amount when the kit is phasing.
+                // The slide is a tendency rather than a rigid rotation: a quarter
+                // of the figure is dropped and refilled every bar, and the fill
+                // is drawn toward the strong steps, so a rotated lane is
+                // continually being pulled back toward the beat while it drifts
+                // away from it. That tension is the sound of the thing.
+                let inherited = rotates
+                    ? Self.slide(last, by: Self.drift[voice] ?? 0, steps: steps)
+                    : last
                 // `.sorted()`, not the set's own order. Swift randomizes hash
                 // seeds per process, so walking a Set draws the random numbers in
                 // a different order every run — and a seeded composer that plays
                 // different music each launch is not seeded at all.
-                for s in last.sorted() where s < steps {
+                for s in inherited.sorted() where s < steps {
                     if laneRng.chance(persistence) { chosen.insert(s) }
                 }
             }
@@ -206,6 +264,17 @@ final class Composer {
 
         measure.hits.sort { $0.tick < $1.tick }
         return measure
+    }
+
+    /// A figure moved `by` steps around the bar, wrapping. Negative slides
+    /// earlier, which is a lane whose cycle is longer than the bar.
+    private static func slide(_ figure: Set<Int>, by amount: Int, steps: Int) -> Set<Int> {
+        guard amount != 0, steps > 0 else { return figure }
+        var moved = Set<Int>()
+        for step in figure where step < steps {
+            moved.insert(((step + amount) % steps + steps) % steps)
+        }
+        return moved
     }
 
     private func applyRepulsion(_ weights: inout [Double], around step: Int, steps: Int, strength: Double) {

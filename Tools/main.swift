@@ -168,6 +168,323 @@ do {
                  calmRate, busyRate))
 }
 
+// MARK: - 2b. Moving between meters
+
+// A meter change cannot be ramped: the bar is either sixteen steps long or it is
+// twenty. So the question is not whether it is smooth but how much of the music
+// survives it, and that is measurable. Retention here is the fraction of the
+// figure — which lane, on which sixteenth of the shared head of the bar — that
+// is the same either side of a bar line. Compare the value across a bar where
+// the meter changed against the value across an ordinary bar and the ratio is
+// the whole answer: 1.0 means the change is indistinguishable from any other
+// bar, and `sections` is in here as the thing to beat.
+
+print("\n── the vocabulary ─────────────────────────────────────")
+
+do {
+    var mismatched: [String] = []
+    for signature in Signature.all {
+        let rebuilt = Signature(groups: signature.groups, ticksPerStep: signature.ticksPerStep)
+        if rebuilt.name != signature.name { mismatched.append("\(signature.name) → \(rebuilt.name)") }
+        if rebuilt.steps != signature.steps { mismatched.append("\(signature.name) steps") }
+    }
+    check("a generated meter is named the way a written one is",
+          mismatched.isEmpty, mismatched.isEmpty ? "all ten round-trip" : mismatched.joined(separator: ", "))
+
+    // The pivot's whole claim: the bar keeps its length, so the quarter note
+    // never moves. If that is not exact it is not a pivot.
+    var pivots = 0
+    var broken: [String] = []
+    for signature in Signature.all {
+        guard let partner = signature.subdivisionPartner else { continue }
+        pivots += 1
+        if partner.ticks != signature.ticks {
+            broken.append("\(signature.name) \(signature.ticks) → \(partner.name) \(partner.ticks)")
+        }
+        if partner.subdivisionPartner != signature {
+            broken.append("\(signature.name) does not come back")
+        }
+    }
+    check("a subdivision pivot keeps the bar exactly as long",
+          broken.isEmpty && pivots >= 4,
+          broken.isEmpty ? "\(pivots) meters pivot, every one length-preserving" : broken.joined(separator: "; "))
+
+    // The one-edit rule: an edit only ever touches the tail, so everything
+    // before the last group is untouched. That is what makes a walk seamless.
+    var offenders: [String] = []
+    for signature in Signature.all {
+        for neighbor in signature.neighbors where neighbor.ticksPerStep == signature.ticksPerStep {
+            let head = signature.groups.dropLast()
+            if !neighbor.groups.starts(with: head) {
+                offenders.append("\(signature.name) → \(neighbor.name)")
+            }
+        }
+    }
+    check("every neighbor keeps the head of the bar", offenders.isEmpty,
+          offenders.isEmpty ? "only the last group is ever edited" : offenders.joined(separator: ", "))
+
+    // Remapping is by tick, and the tick is what has to survive.
+    var worst = 0
+    for from in Signature.all {
+        for to in Signature.all {
+            for step in 0..<from.steps {
+                guard let mapped = to.step(matching: step, in: from) else { continue }
+                worst = max(worst, abs(step * from.ticksPerStep - mapped * to.ticksPerStep))
+            }
+        }
+    }
+    check("remapping a figure moves it less than half a step",
+          worst <= Signature.triple / 2, "worst \(worst) ticks of \(Signature.triple)")
+}
+
+print("\n── the seam ───────────────────────────────────────────")
+
+struct MeterBar {
+    var signature: Signature
+    var measure: Measure
+    var asked: Int
+    var changed: Bool
+}
+
+/// One host's worth of bars: the director, the composer and the meter arc wired
+/// together the way `FlowHost` and `MeterEngine` wire them, including the order —
+/// the arc decides after the bar it is looking at has been composed, so a change
+/// always lands on the next downbeat.
+func runMotion(_ motion: MeterMotion, bars: Int, seed: UInt64, budget: Int = 14) -> [MeterBar] {
+    let director = Director(seed: seed)
+    director.motion = 0.5
+    let composer = Composer(seed: seed)
+    // Off, so this measures placement rather than the scatter on top of it.
+    composer.humanize = 0
+    composer.swing = 0
+    composer.rotates = motion.rotatesLanes
+    let arc = MeterArc(seed: seed)
+    arc.motion = motion
+    var signature = Signature.named("4/4")
+    composer.signature = signature
+    arc.reanchor(signature)
+
+    let home = Double(Signature.named("4/4").ticks)
+    var out: [MeterBar] = []
+    for i in 0..<bars {
+        let tick = director.advance()
+        let asked = motion.holdsDensity
+            ? max(1, Int((Double(budget) * Double(signature.ticks) / home).rounded()))
+            : budget
+        let measure = composer.compose(index: i, budget: asked, tick: tick,
+                                       enabled: Set(DrumVoice.allCases))
+        var changed = false
+        // `quiet: true` on purpose: the gate is what decides *when* a change is
+        // allowed, and this is measuring what happens *when* one lands.
+        let decision = arc.advance(current: signature, quiet: true)
+        if let target = decision.signature, target != signature {
+            let old = signature
+            signature = target
+            composer.signature = target
+            if decision.keepsFigure {
+                composer.remap(from: old, to: target)
+            } else {
+                composer.reset()
+            }
+            changed = true
+        }
+        out.append(MeterBar(signature: measure.signature, measure: measure,
+                            asked: asked, changed: changed))
+    }
+    return out
+}
+
+/// Which lane on which sixteenth, over the part of the bar the two share.
+func figure(_ bar: MeterBar, limit: Int, lanes: Set<DrumVoice>? = nil) -> Set<String> {
+    var out = Set<String>()
+    for hit in bar.measure.hits {
+        if let lanes, !lanes.contains(hit.voice) { continue }
+        let tick = hit.step * bar.signature.ticksPerStep
+        guard tick < limit else { continue }
+        out.insert("\(hit.voice.rawValue)@\(tick / Signature.duple)")
+    }
+    return out
+}
+
+func retention(_ a: MeterBar, _ b: MeterBar, lanes: Set<DrumVoice>? = nil) -> Double {
+    let limit = min(a.signature.ticks, b.signature.ticks)
+    let x = figure(a, limit: limit, lanes: lanes)
+    let y = figure(b, limit: limit, lanes: lanes)
+    let union = x.union(y).count
+    return union == 0 ? 1 : Double(x.intersection(y).count) / Double(union)
+}
+
+struct Seam {
+    var changes = 0
+    var atSeam = 0.0
+    var ordinary = 0.0
+    var densityJump = 0.0
+    var offGrid = 0
+    var short = 0
+    var meters = Set<String>()
+
+    var seamMean: Double { changes == 0 ? 0 : atSeam / Double(changes) }
+    var ordinaryMean: Double { ordinary }
+    /// 1.0 means a meter change looks like any other bar line.
+    var ratio: Double { ordinaryMean == 0 ? 0 : seamMean / ordinaryMean }
+}
+
+func seam(_ motion: MeterMotion, bars: Int = 1_400, seed: UInt64 = 0x5EED) -> Seam {
+    let run = runMotion(motion, bars: bars, seed: seed)
+    var result = Seam()
+    var ordinaryTotal = 0.0
+    var ordinaryCount = 0
+    let home = Double(Signature.named("4/4").ticks)
+    for bar in run {
+        result.meters.insert(bar.signature.name)
+        if bar.measure.spent != bar.asked { result.short += 1 }
+        for hit in bar.measure.hits where hit.tick < 0 || hit.tick >= bar.signature.ticks {
+            _ = hit
+            result.offGrid += 1
+        }
+    }
+    for i in 0..<(run.count - 1) {
+        let value = retention(run[i], run[i + 1])
+        if run[i].changed {
+            result.changes += 1
+            result.atSeam += value
+            // Attacks per bar-length-of-four-four, either side.
+            let before = Double(run[i].measure.spent) * home / Double(run[i].signature.ticks)
+            let after = Double(run[i + 1].measure.spent) * home / Double(run[i + 1].signature.ticks)
+            result.densityJump += abs(after - before) / max(1, before)
+        } else {
+            ordinaryTotal += value
+            ordinaryCount += 1
+        }
+    }
+    result.ordinary = ordinaryCount == 0 ? 0 : ordinaryTotal / Double(ordinaryCount)
+    if result.changes > 0 { result.densityJump /= Double(result.changes) }
+    return result
+}
+
+print("  " + pad("motion", 10) + " changes   at seam   ordinary    ratio   density    meters")
+var seams: [MeterMotion: Seam] = [:]
+for motion in MeterMotion.allCases {
+    let s = seam(motion)
+    seams[motion] = s
+    print("  " + pad(motion.label, 10)
+          + String(format: " %7d   %7.3f   %8.3f   %6.2f   %+6.1f%%   %7d",
+                   s.changes, s.seamMean, s.ordinaryMean, s.ratio,
+                   s.densityJump * 100, s.meters.count))
+}
+
+do {
+    // Every motion, including the ones inventing meters nobody wrote down, has
+    // to keep the promise the whole program is built on.
+    for motion in MeterMotion.allCases {
+        let s = seams[motion]!
+        check("\(motion.label): still spends every attack, on the grid",
+              s.short == 0 && s.offGrid == 0,
+              "\(s.short) short, \(s.offGrid) off grid")
+    }
+
+    let sections = seams[.sections]!
+    for motion in [MeterMotion.pivot, .walk, .elide] {
+        let s = seams[motion]!
+        check("\(motion.label) keeps more of the figure than sections does",
+              s.changes > 0 && s.seamMean > sections.seamMean * 1.5,
+              String(format: "%.3f vs %.3f at the seam", s.seamMean, sections.seamMean))
+    }
+
+    // The pivot's bar never changes length, so holding the density is a no-op
+    // for it — which is the proof that it is the gentle one.
+    check("a pivot needs no density correction at all",
+          seams[.pivot]!.densityJump < 0.02,
+          String(format: "%.2f%% density change across a pivot", seams[.pivot]!.densityJump * 100))
+    check("holding the density is doing something",
+          seams[.walk]!.densityJump < sections.densityJump * 0.6,
+          String(format: "walk %.1f%% vs sections %.1f%%",
+                 seams[.walk]!.densityJump * 100, sections.densityJump * 100))
+
+    // A walk should get somewhere. One that only ever plays four is not a walk.
+    check("a walk visits more meters than sections picks from",
+          seams[.walk]!.meters.count >= 6, "\(seams[.walk]!.meters.count) meters over 1,400 bars")
+    check("nothing but rotate and fixed leaves the bar alone",
+          seams[.fixed]!.meters.count == 1 && seams[.rotate]!.meters.count == 1,
+          "fixed \(seams[.fixed]!.meters.count), rotate \(seams[.rotate]!.meters.count)")
+
+    // Rotation needs its own two measurements, because position retention is the
+    // wrong question to ask of it. A figure slid one sixteenth along has almost
+    // no positions in common with where it was, and that is the feature. So:
+    //
+    //   * *where* — position retention, which rotation should collapse.
+    //   * *what*  — the multiset of gaps between a lane's hits, which is
+    //     invariant under sliding, and which rotation should therefore leave
+    //     roughly where holding still leaves it.
+    //
+    // The pair is the whole claim: the same figure, somewhere else. Either alone
+    // is satisfied by a randomizer.
+    let low: Set<DrumVoice> = [.bass, .snare]
+    let upper = Set(DrumVoice.allCases).subtracting(low)
+
+    /// A lane's figure as the cyclic gaps between its hits — its shape, with its
+    /// position thrown away.
+    func gaps(_ bar: MeterBar, lane: DrumVoice) -> [Int] {
+        let steps = bar.measure.hits.filter { $0.voice == lane }.map(\.step).sorted()
+        guard steps.count >= 2 else { return [] }
+        let span = bar.signature.steps
+        return steps.indices.map { i in
+            ((steps[(i + 1) % steps.count] - steps[i]) % span + span) % span
+        }.sorted()
+    }
+
+    func shared(_ a: [Int], _ b: [Int]) -> Double {
+        guard !a.isEmpty, !b.isEmpty else { return a.isEmpty && b.isEmpty ? 1 : 0 }
+        var counts: [Int: Int] = [:]
+        for x in a { counts[x, default: 0] += 1 }
+        var matched = 0
+        for x in b where (counts[x] ?? 0) > 0 {
+            counts[x]! -= 1
+            matched += 1
+        }
+        return Double(2 * matched) / Double(a.count + b.count)
+    }
+
+    func phasing(_ motion: MeterMotion, lanes: Set<DrumVoice>) -> (where_: Double, what: Double) {
+        let run = runMotion(motion, bars: 400, seed: 0x0A5E)
+        var position = 0.0
+        var shape = 0.0
+        var shapeCount = 0
+        for i in 0..<(run.count - 1) {
+            position += retention(run[i], run[i + 1], lanes: lanes)
+            for lane in lanes {
+                let before = gaps(run[i], lane: lane), after = gaps(run[i + 1], lane: lane)
+                guard !before.isEmpty, !after.isEmpty else { continue }
+                shape += shared(before, after)
+                shapeCount += 1
+            }
+        }
+        return (position / Double(run.count - 1),
+                shapeCount == 0 ? 0 : shape / Double(shapeCount))
+    }
+
+    let rotatedUpper = phasing(.rotate, lanes: upper)
+    let rotatedLow = phasing(.rotate, lanes: low)
+    let stillUpper = phasing(.fixed, lanes: upper)
+    print(String(format: "\n  %@  where    what", pad("", 10)))
+    print(String(format: "  %@%7.3f %7.3f", pad("upper kit", 10), rotatedUpper.where_, rotatedUpper.what))
+    print(String(format: "  %@%7.3f %7.3f", pad("low end", 10), rotatedLow.where_, rotatedLow.what))
+    print(String(format: "  %@%7.3f %7.3f", pad("fixed", 10), stillUpper.where_, stillUpper.what))
+
+    check("rotation moves the upper kit somewhere else",
+          rotatedUpper.where_ < stillUpper.where_ * 0.6,
+          String(format: "%.3f of positions kept, vs %.3f held still",
+                 rotatedUpper.where_, stillUpper.where_))
+    check("and it is the same figure when it gets there",
+          rotatedUpper.what > stillUpper.what * 0.8,
+          String(format: "%.3f of the shape kept, vs %.3f held still",
+                 rotatedUpper.what, stillUpper.what))
+    check("rotation leaves the bass and snare where they are",
+          rotatedLow.where_ > rotatedUpper.where_ * 1.5,
+          String(format: "low end keeps %.3f, upper kit %.3f",
+                 rotatedLow.where_, rotatedUpper.where_))
+}
+
 // MARK: - 3. The rack
 
 /// The pitch a patch leaves ringing, and how strongly.
@@ -400,6 +717,68 @@ for budget in [6, 14, 48] {
           String(format: "peak %.3f, rms %.3f", m.peak, m.rms))
     check("budget \(budget) stays under the ceiling", m.peak < 1.0 && m.clipped == 0,
           String(format: "peak %.3f, %d clipped samples", m.peak, m.clipped))
+}
+
+// And the same thing through a moving bar. The arithmetic above is all at
+// sixteen steps of twenty-four ticks; a walk generates meters nobody wrote down
+// and a pivot changes how long a step *is*, so this renders one actually through
+// the room and the limiter rather than trusting that it would.
+do {
+    /// Bars that a walk produced, rendered end to end at a fixed tempo. Silence
+    /// would mean the tick arithmetic came apart somewhere a bar length changed;
+    /// a gap would mean a bar was rendered short.
+    func mixWalk(_ motion: MeterMotion) -> (peak: Float, rms: Float, clipped: Int, seconds: Double, meters: Int) {
+        let run = runMotion(motion, bars: 170, seed: 0x11CE)
+        var kit: [DrumVoice: LaneSettings] = [:]
+        for v in DrumVoice.allCases { kit[v] = .default(for: v) }
+        let output = AudioOutput(offline: true)
+        output.synth.masterVolume = 0.85
+        output.reverbMix = 14
+
+        let tickSeconds = 60.0 / 128.0 / Double(ticksPerQuarter)
+        var peak: Float = 0
+        var energy: Double = 0
+        var samples = 0
+        var clipped = 0
+        var seconds = 0.0
+        var meters = Set<String>()
+
+        func take(_ length: Double) {
+            guard length > 0 else { return }
+            seconds += length
+            output.renderOffline(seconds: length) { l, r, n in
+                for i in 0..<n {
+                    peak = max(peak, max(abs(l[i]), abs(r[i])))
+                    energy += Double(l[i]) * Double(l[i])
+                    samples += 1
+                    if abs(l[i]) > 0.999 || abs(r[i]) > 0.999 { clipped += 1 }
+                }
+            }
+        }
+
+        for bar in run {
+            meters.insert(bar.signature.name)
+            var previous = 0
+            for hit in bar.measure.hits {
+                take(Double(hit.tick - previous) * tickSeconds)
+                previous = hit.tick
+                guard let lane = kit[hit.voice] else { continue }
+                output.synth.triggers.push(Trigger(voice: hit.voice, lane: lane,
+                                                   velocity: hit.velocity))
+            }
+            take(max(0.001, Double(bar.signature.ticks - previous) * tickSeconds))
+        }
+        return (peak, Float((energy / Double(max(1, samples))).squareRoot()),
+                clipped, seconds, meters.count)
+    }
+
+    for motion in [MeterMotion.pivot, .walk, .elide, .rotate] {
+        let m = mixWalk(motion)
+        check("\(motion.label) renders through the room without clipping",
+              m.peak > 0.3 && m.rms > 0.02 && m.peak < 1.0 && m.clipped == 0,
+              String(format: "peak %.3f, rms %.3f, %d clipped, %.1fs of %d meters",
+                     m.peak, m.rms, m.clipped, m.seconds, m.meters))
+    }
 }
 
 print("\n\(failures == 0 ? "all checks passed" : "\(failures) check(s) failed")\n")

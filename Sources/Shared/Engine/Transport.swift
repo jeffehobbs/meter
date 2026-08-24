@@ -86,12 +86,29 @@ final class Transport {
             self.director.enabled = self.enabled
         }
     }
-    func set(signature: Signature) {
+    /// Change the meter, either keeping what the lanes were playing or throwing
+    /// it away.
+    ///
+    /// `keepFigure` is the difference between a meter change that sounds like the
+    /// same music in a differently-shaped bar and one that sounds like a new
+    /// section: without it every lane re-rolls on the same downbeat. The current
+    /// bar always plays out to its end either way — `beginMeasure` composes at the
+    /// downbeat and `tick` counts against the measure's own signature, so nothing
+    /// here can cut a bar short.
+    func set(signature: Signature, keepFigure: Bool = false) {
         queue.async {
+            let old = self.composer.signature
             self.composer.signature = signature
-            self.composer.reset()
+            if keepFigure {
+                self.composer.remap(from: old, to: signature)
+            } else {
+                self.composer.reset()
+            }
         }
     }
+
+    /// Whether the lanes phase against the bar. See `MeterMotion.rotate`.
+    func set(rotates: Bool) { queue.async { self.composer.rotates = rotates } }
     /// Everything else the composer owns, in one hop.
     ///
     /// Written straight through. The director briefly drifted these by a factor

@@ -17,6 +17,7 @@ enum Factory {
     static let bpm = 112.0
     static let budget = 14.0
     static let signature = "4/4"
+    static let meterMotion = MeterMotion.fixed
     static let swing = 0.12
     static let humanize = 0.35
     static let drift = 0.28
@@ -49,13 +50,33 @@ final class MeterEngine: ObservableObject {
     /// Attacks per measure. The whole program in one number.
     @Published var budget: Double = Factory.budget {
         didSet {
-            transport.set(budget: Int(budget))
+            pushBudget()
             if flowing && !flowIsWriting { flow.reanchor(budget: budget) }
             save()
         }
     }
-    @Published var signatureName: String = Factory.signature {
-        didSet { transport.set(signature: Signature.named(signatureName)); save() }
+    /// The bar. A `Signature` rather than a name, because a walk generates meters
+    /// that were never in the list and a name cannot describe one.
+    @Published var signature: Signature = .named(Factory.signature) {
+        didSet {
+            guard signature != oldValue else { return }
+            transport.set(signature: signature,
+                          keepFigure: arcIsWriting ? arcKeepsFigure : meterMotion.keepsFigure)
+            // The budget is attacks per bar at four-four, so a bar that changed
+            // length needs the number pushed again.
+            pushBudget()
+            // A meter chosen by hand becomes the one a walk is pulled back
+            // toward, the same way a tempo set by hand re-centres Flow.
+            if !arcIsWriting { meterArc.reanchor(signature) }
+            save()
+        }
+    }
+    var signatureName: String { signature.name }
+
+    /// How the bar moves on its own, if at all. Off as it ships: see
+    /// `MeterMotion`.
+    @Published var meterMotion: MeterMotion = Factory.meterMotion {
+        didSet { syncMeter(); save() }
     }
 
     // Feel
@@ -127,9 +148,17 @@ final class MeterEngine: ObservableObject {
     private let composer = Composer()
     private let transport: Transport
     private let flow = FlowDirector()
+    /// How the bar moves, asked once a measure. Deliberately not inside Flow:
+    /// `moves` is its own switch, and a switch that silently does nothing unless
+    /// another one is also on is a switch that looks broken.
+    private let meterArc = MeterArc()
     /// Set while Flow is writing tempo or budget, so the `didSet` on those
     /// properties can tell its own change from the player reaching for a slider.
     private var flowIsWriting = false
+    /// Set while the meter arc is writing `signature`, with what it decided about
+    /// keeping the figures — the `didSet` cannot see the decision that caused it.
+    private var arcIsWriting = false
+    private var arcKeepsFigure = true
     private var meterTimer: Timer?
 
     private let defaults = UserDefaults.standard
@@ -191,6 +220,7 @@ final class MeterEngine: ObservableObject {
         shares = tick.shares
         temperature = tick.temperature
         applyFlow()
+        applyMeter(measure)
 
 
         // The director's own edits to the rack. Applying them here, on the main
@@ -230,12 +260,42 @@ final class MeterEngine: ObservableObject {
         flowIsWriting = true
         if let tempo = move.tempo { bpm = tempo }
         if let budget = move.budget { self.budget = budget }
-        if let signature = move.signature, signature != signatureName {
-            signatureName = signature
-        }
         flowIsWriting = false
         if !move.notes.isEmpty {
             activity = (move.notes + activity).prefix(9).map { $0 }
+        }
+    }
+
+    /// Attacks per bar, scaled to how long the bar currently is.
+    ///
+    /// The slider is the player's, and a machine that moves it is a machine that
+    /// has taken something. So the slider keeps meaning "this dense, at
+    /// four-four" and the scaling happens on the way to the transport: a bar a
+    /// quarter longer gets a quarter more attacks and comes out at the same
+    /// attacks per second. Without it a meter change arrives wearing a density
+    /// change, and the two together read as an edit rather than as a meter
+    /// change. Only when the motion asks for it — with nothing turned on, the
+    /// budget is attacks per bar and nothing else, exactly as before.
+    private func pushBudget() {
+        let scale = meterMotion.holdsDensity
+            ? Double(signature.ticks) / Double(Signature.named("4/4").ticks)
+            : 1
+        transport.set(budget: max(1, Int((budget * scale).rounded())))
+    }
+
+    /// One bar of the meter arc, off the measure that just played.
+    private func applyMeter(_ measure: Measure) {
+        guard meterMotion.changesSignature else { return }
+        let decision = meterArc.advance(current: signature,
+                                        quiet: MeterArc.isQuiet(measure) || flow.isThin)
+        guard let target = decision.signature, target != signature else { return }
+        arcIsWriting = true
+        arcKeepsFigure = decision.keepsFigure
+        signature = target
+        arcIsWriting = false
+        if !decision.notes.isEmpty {
+            activity = (decision.notes.map { "\(measure.index + 1) · \($0)" } + activity)
+                .prefix(9).map { $0 }
         }
     }
 
@@ -296,7 +356,8 @@ final class MeterEngine: ObservableObject {
         isLoading = true
         bpm = Factory.bpm
         budget = Factory.budget
-        signatureName = Factory.signature
+        signature = .named(Factory.signature)
+        meterMotion = Factory.meterMotion
         swing = Factory.swing
         humanize = Factory.humanize
         drift = Factory.drift
@@ -358,6 +419,18 @@ final class MeterEngine: ObservableObject {
         transport.setDirector(motion: motion, spread: spread, evolvePatches: evolvePatches)
     }
 
+    /// One switch reaches two places: the arc that hands out new signatures, and
+    /// the composer, for the one option that changes no signature at all.
+    private func syncMeter() {
+        meterArc.motion = meterMotion
+        meterArc.reanchor(signature)
+        transport.set(rotates: meterMotion.rotatesLanes)
+        // The scaling in `pushBudget` depends on this switch, so the transport
+        // has to be told again — otherwise turning it on mid-session leaves it
+        // holding a number computed under the old rule.
+        pushBudget()
+    }
+
     /// Keep the echo musical, and let the director move it: the subdivision is
     /// whatever it has drifted to, and the depth scales what the player asked
     /// for. The room is not in here on purpose — that one stays put.
@@ -381,13 +454,13 @@ final class MeterEngine: ObservableObject {
     /// with the interface after a load.
     private func sync() {
         transport.set(bpm: bpm)
-        transport.set(budget: Int(budget))
-        transport.set(signature: Signature.named(signatureName))
+        transport.set(signature: signature)
         transport.set(route: route)
         transport.set(kit: kit)
         audio.place(kit)
         syncFeel()
         syncDirector()
+        syncMeter()
         syncDelay()
         midi.channel = UInt8(max(1, min(16, midiChannel)) - 1)
         midi.sendsClock = sendsClock
@@ -408,10 +481,12 @@ final class MeterEngine: ObservableObject {
         static let volume = "volume", reverb = "reverb", echo = "echo"
         static let kit = "kit"
         static let flowing = "flowing"
+        static let meterMotion = "meterMotion"
 
         static let all = [bpm, budget, signature, swing, humanize, drift, accent,
                           flam, motion, spread, evolve, route, channel, clock,
-                          destination, volume, reverb, echo, kit, flowing]
+                          destination, volume, reverb, echo, kit, flowing,
+                          meterMotion]
     }
 
     private func load() {
@@ -420,7 +495,11 @@ final class MeterEngine: ObservableObject {
         if defaults.object(forKey: Key.bpm) != nil {
             bpm = defaults.double(forKey: Key.bpm)
             budget = defaults.double(forKey: Key.budget)
-            signatureName = defaults.string(forKey: Key.signature) ?? "4/4"
+            // By name, so a session opens on a meter that exists rather than on
+            // wherever an unattended walk happened to end up.
+            signature = .named(defaults.string(forKey: Key.signature) ?? Factory.signature)
+            meterMotion = defaults.string(forKey: Key.meterMotion)
+                .flatMap(MeterMotion.init(rawValue:)) ?? Factory.meterMotion
             swing = defaults.double(forKey: Key.swing)
             humanize = defaults.double(forKey: Key.humanize)
             drift = defaults.double(forKey: Key.drift)
@@ -463,7 +542,8 @@ final class MeterEngine: ObservableObject {
         guard !isLoading else { return }
         defaults.set(bpm, forKey: Key.bpm)
         defaults.set(budget, forKey: Key.budget)
-        defaults.set(signatureName, forKey: Key.signature)
+        defaults.set(signature.name, forKey: Key.signature)
+        defaults.set(meterMotion.rawValue, forKey: Key.meterMotion)
         defaults.set(swing, forKey: Key.swing)
         defaults.set(humanize, forKey: Key.humanize)
         defaults.set(drift, forKey: Key.drift)

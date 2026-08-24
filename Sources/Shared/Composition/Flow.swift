@@ -25,7 +25,6 @@ final class FlowDirector {
     struct Move {
         var tempo: Double?
         var budget: Double?
-        var signature: String?
         var notes: [String] = []
     }
 
@@ -37,14 +36,14 @@ final class FlowDirector {
     private(set) var anchorBudget: Double = 14
 
     private enum Arc: String, CaseIterable {
-        case tempo, density, meter
+        case tempo, density
 
-        /// In measures, and prime, so no two arcs ever turn over together.
+        /// In measures, and prime, so no two arcs ever turn over together. The
+        /// meter's own period lives in `MeterMotion`, and is prime against these.
         var period: Int {
             switch self {
             case .density: return 17
             case .tempo:   return 29
-            case .meter:   return 61
             }
         }
     }
@@ -56,11 +55,6 @@ final class FlowDirector {
     private var tempo: Double = 112
     private var budget: Double = 14
     private var rng: Rng
-
-    /// The meters Flow is allowed to choose. Odd ones are in because they are
-    /// the reason the composer knows about pulse groups at all, and because a
-    /// machine that only ever plays in four is a machine you stop hearing.
-    private static let meters = ["4/4", "4/4", "4/4", "3/4", "6/8", "7/8", "5/4"]
 
     init(seed: UInt64 = Rng.freshSeed()) {
         rng = Rng(seed: seed)
@@ -103,6 +97,11 @@ final class FlowDirector {
     }
 
     /// One measure. Returns whatever changed.
+    ///
+    /// The bar is not in here. A meter change is not a slow arc — it is the one
+    /// gesture that cannot be ramped — and it is its own switch, so it is its own
+    /// object: see `MeterArc`, which the hosts ask once a bar whether or not Flow
+    /// is running.
     func advance() -> Move {
         guard isRunning else { return Move() }
         clock += 1
@@ -127,6 +126,13 @@ final class FlowDirector {
         return move
     }
 
+    /// Whether Flow has thinned the music out. The least interruptible place in a
+    /// session is the bottom of one of its long quiet passages, so the meter arc
+    /// asks this before it changes anything — when Flow is running at all.
+    var isThin: Bool { isRunning && budget < anchorBudget * 0.8 }
+
+    private func clampBudget(_ value: Double) -> Double { min(48, max(3, value)) }
+
     private func perform(_ arc: Arc, into move: inout Move) {
         switch arc {
         case .tempo:
@@ -141,21 +147,9 @@ final class FlowDirector {
             // The arc that shapes a session: long thin passages and short busy
             // ones, rather than a constant.
             let target = anchorBudget * rng.range(0.45, 1.7)
-            budgetRamp = Ramp(from: budget, to: min(48, max(3, target)),
+            budgetRamp = Ramp(from: budget, to: clampBudget(target),
                               start: clock, duration: rng.range(10, 30))
             move.notes.append(target > budget ? "flow: filling in" : "flow: thinning out")
-
-        case .meter:
-            // A meter change is a section, not a drift — there is no ramping it.
-            // So it happens where a section change belongs: at the thinnest part
-            // of a passage, when there is least to interrupt.
-            guard budget < anchorBudget * 0.8 else {
-                due[.meter] = clock + 4
-                return
-            }
-            let choice = rng.pick(Self.meters)
-            move.signature = choice
-            move.notes.append("flow: \(choice)")
         }
     }
 }

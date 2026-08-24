@@ -6,19 +6,56 @@ import Foundation
 let ticksPerQuarter = 96
 
 /// A time signature, described the way the composer needs it: how many steps a
-/// measure has, and how those steps group into pulses. The grouping is what
-/// gives an odd meter its accent pattern — 7/8 is not "seven eighths", it is
-/// 2+2+3, and placing hits without knowing that produces something that limps.
+/// measure has, how those steps group into pulses, and how long a step is. The
+/// grouping is what gives an odd meter its accent pattern — 7/8 is not "seven
+/// eighths", it is 2+2+3, and placing hits without knowing that produces
+/// something that limps.
 struct Signature: Identifiable, Hashable, Codable {
     var name: String
-    /// Sixteenth-note steps per measure.
+    /// Steps per measure, each `ticksPerStep` long.
     var steps: Int
     /// Steps per pulse group, summing to `steps`.
     var groups: [Int]
+    /// How long one step is. Duple meters step in sixteenths; the triplet
+    /// variants step in thirds of a quarter, which is what lets a bar change its
+    /// subdivision without changing its length. See `subdivisionPartner`.
+    var ticksPerStep: Int = Signature.duple
 
     var id: String { name }
-    var ticksPerStep: Int { ticksPerQuarter / 4 }
     var ticks: Int { steps * ticksPerStep }
+
+    /// The two subdivisions Meter knows: a sixteenth of a quarter, and a third
+    /// of one.
+    static let duple = ticksPerQuarter / 4      // 24
+    static let triple = ticksPerQuarter / 3     // 32
+
+    /// Group lengths a meter of this subdivision is allowed to use: a quarter or
+    /// a dotted quarter in sixteenths, one quarter in triplet eighths.
+    var vocabulary: [Int] { ticksPerStep == Signature.triple ? [3] : [4, 6] }
+
+    /// Named from the groups, so a generated meter reads the same way a written
+    /// one does. All ten of the meters below reproduce their own names through
+    /// this, which is the check that it agrees with how the app already talks.
+    init(groups: [Int], ticksPerStep: Int = Signature.duple) {
+        let steps = groups.reduce(0, +)
+        self.steps = steps
+        self.groups = groups
+        self.ticksPerStep = ticksPerStep
+        if ticksPerStep == Signature.triple {
+            name = "\(steps / 3)/4 triplet"
+        } else if groups.allSatisfy({ $0 == 4 }) {
+            name = "\(groups.count)/4"
+        } else {
+            name = "\(steps / 2)/8"
+        }
+    }
+
+    init(name: String, steps: Int, groups: [Int], ticksPerStep: Int = Signature.duple) {
+        self.name = name
+        self.steps = steps
+        self.groups = groups
+        self.ticksPerStep = ticksPerStep
+    }
 
     static let all: [Signature] = [
         Signature(name: "4/4",  steps: 16, groups: [4, 4, 4, 4]),
@@ -35,6 +72,60 @@ struct Signature: Identifiable, Hashable, Codable {
 
     static func named(_ name: String) -> Signature {
         all.first { $0.name == name } ?? all[0]
+    }
+
+    // MARK: - Moving
+
+    /// The same bar, subdivided the other way.
+    ///
+    /// Four quarters in sixteenths is sixteen steps of 24 ticks; four quarters in
+    /// triplet eighths is twelve steps of 32. Both are 384 ticks, so the bar keeps
+    /// its length and the quarter note never moves — the feel goes from straight
+    /// to a shuffle and the listener's foot stays where it was. This is the least
+    /// disruptive move in the app, and it is only available to quarter-based
+    /// meters: a group of six sixteenths is a dotted quarter, and there is no
+    /// whole number of triplet eighths in one.
+    var subdivisionPartner: Signature? {
+        if ticksPerStep == Signature.triple {
+            return Signature(groups: groups.map { _ in 4 }, ticksPerStep: Signature.duple)
+        }
+        guard groups.allSatisfy({ $0 == 4 }) else { return nil }
+        return Signature(groups: groups.map { _ in 3 }, ticksPerStep: Signature.triple)
+    }
+
+    /// Meters one edit away, where an edit only ever touches the *tail* of the
+    /// bar: append a group, drop the last one, relength the last one, or pivot the
+    /// subdivision. That restriction is the whole point. `[4,4,4,4]` → `[4,4,4,4,4]`
+    /// is 4/4 → 5/4 in which the first sixteen steps are literally identical and a
+    /// beat is appended; relengthening an interior group would shift everything
+    /// after it, which is the kind of change the ear catches.
+    var neighbors: [Signature] {
+        var out: [Signature] = []
+        let vocab = vocabulary
+        if groups.count < 7 {
+            for len in vocab { out.append(Signature(groups: groups + [len], ticksPerStep: ticksPerStep)) }
+        }
+        if groups.count > 2 {
+            out.append(Signature(groups: Array(groups.dropLast()), ticksPerStep: ticksPerStep))
+        }
+        for len in vocab where len != groups.last {
+            out.append(Signature(groups: Array(groups.dropLast()) + [len], ticksPerStep: ticksPerStep))
+        }
+        if let partner = subdivisionPartner { out.append(partner) }
+        return out.filter { $0.steps >= 6 && $0 != self }
+    }
+
+    /// Where a step of `other` lands in this meter, by tick rather than by index.
+    ///
+    /// One rule covers both kinds of move, which is why it is the only one here.
+    /// Across a subdivision pivot the tick is what has to survive — step 8 of
+    /// sixteen is beat three, and so is step 6 of twelve. Across a bar-length
+    /// change the step index is what has to survive, and preserving the tick does
+    /// exactly that, because the step is the same length on both sides.
+    func step(matching step: Int, in other: Signature) -> Int? {
+        let tick = step * other.ticksPerStep
+        let mapped = Int((Double(tick) / Double(ticksPerStep)).rounded())
+        return mapped < steps ? mapped : nil
     }
 
     /// Metric weight per step, 0 … 1. The downbeat is 1, each group's head is

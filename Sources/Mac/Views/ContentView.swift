@@ -105,7 +105,7 @@ struct ContentView: View {
             Spacer()
 
             stat("\(Int(engine.bpm))", "bpm")
-            stat("\(Int(engine.budget))", "budget")
+            stat("\(barBudget)", "budget")
             stat("\(engine.measure.spent)", "spent")
             stat("\(engine.measureIndex + 1)", "measure")
             meter
@@ -124,11 +124,30 @@ struct ContentView: View {
 
     private var meter: some View { LevelMeter(levels: engine.levels) }
 
+    /// What this bar was asked to spend, which is what `spent` has to be read
+    /// against — otherwise a bar scaled to hold its density through a meter
+    /// change reads as "six of five attacks", and the one promise the whole
+    /// program rests on looks broken.
+    ///
+    /// The slider itself when nothing is scaling it, so that dragging it still
+    /// moves the number in the same instant rather than at the next downbeat.
+    private var barBudget: Int {
+        engine.meterMotion.holdsDensity ? engine.measure.budget : Int(engine.budget)
+    }
+
+    /// The ten written meters, plus whatever the bar currently is if the machine
+    /// walked somewhere the list does not name.
+    private var meterChoices: [Signature] {
+        Signature.all.contains(engine.signature)
+            ? Signature.all
+            : Signature.all + [engine.signature]
+    }
+
     // MARK: - Budget
 
     private var budget: some View {
         Panel(title: "Allocation",
-              trailing: "\(engine.measure.spent) / \(Int(engine.budget)) attacks") {
+              trailing: "\(engine.measure.spent) / \(barBudget) attacks") {
             VStack(alignment: .leading, spacing: 6) {
                 BudgetBar(shares: engine.shares,
                           counts: engine.measure.counts,
@@ -184,16 +203,33 @@ struct ContentView: View {
                         Dial(title: "Budget", value: $engine.budget,
                              range: 1...64, format: { String(format: "%.0f", $0) }, step: 1,
                              live: engine.flowing,
-                             hint: "Attacks per measure. The machine spends all of them.")
+                             hint: engine.meterMotion.holdsDensity
+                                 ? "Attacks per bar of four-four. A bar of another length is scaled to match, so the density survives a meter change. The machine spends all of them."
+                                 : "Attacks per measure. The machine spends all of them.")
                         HStack(spacing: 4) {
                             Theme.label("meter")
                             Spacer()
-                            Picker("", selection: $engine.signatureName) {
-                                ForEach(Signature.all) { Text($0.name).tag($0.name) }
+                            Picker("", selection: $engine.signature) {
+                                // The current bar is listed even when it is not
+                                // one of the ten: a walk generates meters that
+                                // were never in the list, and a picker that goes
+                                // blank is a picker that looks broken.
+                                ForEach(meterChoices) { Text($0.name).tag($0) }
                             }
                             .labelsHidden()
                             .controlSize(.mini)
-                            .frame(width: 84)
+                            .frame(width: 96)
+                        }
+                        HStack(spacing: 4) {
+                            Theme.label("moves")
+                            Spacer()
+                            Picker("", selection: $engine.meterMotion) {
+                                ForEach(MeterMotion.allCases) { Text($0.label).tag($0) }
+                            }
+                            .labelsHidden()
+                            .controlSize(.mini)
+                            .frame(width: 96)
+                            .help(engine.meterMotion.hint)
                         }
                     }
                 }

@@ -13,6 +13,7 @@ struct FlowView: View {
     @ObservedObject var host: FlowHost
     @State private var tuning = false
     @State private var marked = false
+    @State private var choosingMotion = false
     /// The simulator has no way to tap anything, so the two screens this app has
     /// are reachable from the environment for the sake of being able to look at
     /// a build. See also METER_AUTOPLAY in FlowHost.
@@ -58,6 +59,18 @@ struct FlowView: View {
         }
         .animation(.easeInOut(duration: 0.2), value: marked)
         .onAppear { if opensTuning { tuning = true } }
+        .sheet(isPresented: $choosingMotion) {
+            NavigationStack {
+                MeterMotionPicker(host: host)
+                    .navigationTitle("The bar")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { choosingMotion = false }
+                        }
+                    }
+            }
+        }
         .sheet(isPresented: $tuning) {
             NavigationStack {
                 CadenceTuningView(cadence: host.cadence)
@@ -79,7 +92,14 @@ struct FlowView: View {
             Text("METER")
                 .font(.system(size: 14, weight: .heavy))
                 .tracking(3.6)
-                .foregroundStyle(Flow.text)
+                .foregroundStyle(host.meterMotion == .fixed ? Flow.text : Flow.live)
+                // Long press for how the bar is allowed to move. Not on the
+                // screen proper on purpose: this build has two controls, and
+                // this is a thing to set once and then forget, not a knob.
+                .onLongPressGesture(minimumDuration: 0.6) {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    choosingMotion = true
+                }
             Spacer()
             sleepButton
             Button { tuning = true } label: {
@@ -149,7 +169,12 @@ struct FlowView: View {
                 HStack {
                     Flow.label("density")
                     Spacer()
-                    Text("\(Int(host.budget)) per bar")
+                    // "per bar" would be a false claim once the bar's own
+                    // length is being scaled against this: what the listener set
+                    // is a density, and four-four is what it is quoted in.
+                    Text(host.meterMotion.holdsDensity
+                         ? "\(Int(host.budget)) at 4/4"
+                         : "\(Int(host.budget)) per bar")
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(Flow.text)
                 }
@@ -194,6 +219,48 @@ struct FlowView: View {
             }
             .padding(.top, 2)
         }
+    }
+}
+
+/// How the bar is allowed to move, and what each answer costs.
+///
+/// A list rather than a segmented control because the difference between these
+/// is not something a one-word label carries — every one of them is a different
+/// theory of where a meter change can hide, and the only way to choose is to
+/// read what the theory is and then listen to it for twenty minutes.
+private struct MeterMotionPicker: View {
+    @ObservedObject var host: FlowHost
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(MeterMotion.allCases) { motion in
+                    Button { host.meterMotion = motion } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: host.meterMotion == motion
+                                  ? "largecircle.fill.circle" : "circle")
+                                .foregroundStyle(host.meterMotion == motion ? Flow.accent : Flow.dim)
+                                .padding(.top, 2)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(motion.label)
+                                    .font(.system(size: 15, weight: .medium))
+                                    .foregroundStyle(Flow.text)
+                                Text(motion.hint)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Flow.dim)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+            } footer: {
+                Text("Now playing in \(host.signature.name).")
+                    .font(.system(size: 12))
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .background(Flow.background)
     }
 }
 

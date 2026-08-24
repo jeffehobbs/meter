@@ -243,7 +243,51 @@ offsets, and MIDI beat clock falls out of the same counter at every fourth tick 
 separate clock generator is the arrangement that drifts out of step after ten
 minutes.
 
-Meters: 4/4, 3/4, 5/4, 7/4, 5/8, 6/8, 7/8, 9/8, 11/8, 12/8.
+Meters: 4/4, 3/4, 5/4, 7/4, 5/8, 6/8, 7/8, 9/8, 11/8, 12/8 — and, when the bar
+is allowed to move, meters nobody wrote down.
+
+## Moving the bar
+
+A meter change is the one gesture in the app that **cannot be ramped**.
+Everything else the director does is a slide: a share, a macro, a tempo. The bar
+is either sixteen steps long or it is twenty, and there is no halfway. So the
+question is not how to smooth it but where to hide it, and the **moves** picker is
+six different answers, exactly one running at a time. It ships as `fixed`.
+
+| moves | what it does |
+|---|---|
+| `fixed` | nothing. The bar is what you set. |
+| `sections` | pick a new meter outright, at the thinnest part of a passage. |
+| `pivot` | 4/4 ⇄ 4/4 triplet — **same bar length**, other subdivision. |
+| `elide` | one bar of 7/8 inside four, then back. |
+| `walk` | a meter one **tail edit** away: a beat appended, dropped, relengthened. |
+| `rotate` | never changes the meter; the lanes phase against the bar instead. |
+
+`pivot` is the gentlest because it is not really a meter change: sixteen
+sixteenths of 24 ticks and twelve triplet-eighths of 32 are both 384 ticks, so the
+bar keeps its length and the quarter note never moves. Straight becomes a shuffle
+with nothing to catch.
+
+`walk` only ever edits the **last group** of the bar. `[4,4,4,4]` → `[4,4,4,4,4]`
+is 4/4 → 5/4 in which the first sixteen steps are literally identical and a beat
+is appended; relengthening an interior group would shift everything after it,
+which is the kind of change the ear catches. Because every step is that small, a
+walk can get a long way from four — eight meters over 1,400 bars in the checks,
+including ones the list above does not name.
+
+`rotate` is the only option that *cannot* disrupt the beat, because nothing global
+ever changes. Each lane's figure slides a small fixed number of steps per bar, so
+the kit phases against itself — and the bass and snare slide by zero, because a
+kit in which nothing is where one is does not sound polymetric, it sounds broken.
+
+Two things underneath matter more than the choice between them. A meter change
+used to wipe the composer's memory, so nine lanes re-rolled on the same downbeat
+— worse than the new bar length, and the real reason it read as an edit. Now the
+figure is **remapped by tick**, which is the single rule that covers both kinds of
+move: across a pivot the tick is what has to survive, and across a length change
+preserving the tick preserves the step index. And the budget is held as **attacks
+per bar of 4/4**, scaled to whatever the bar currently is, so a shorter bar does
+not arrive wearing a density change as well.
 
 ## MIDI
 
@@ -260,6 +304,13 @@ never left holding a note.
 
 - every measure spends its budget exactly, at budgets 1 → 64 and in all ten
   meters, with nothing off the grid, doubled, or over a lane's cap;
+- **how much a meter change costs**, per option above: what fraction of the figure
+  survives a bar line where the meter moved, against an ordinary bar line. A ratio
+  of 1.0 means the change is indistinguishable from any other bar. `sections`
+  scores 0.17 and is in there as the thing to beat; `walk` scores 0.96. The same
+  section checks that a pivot needs no density correction at all, that a walk only
+  ever edits the tail, and that rotation moves the kit somewhere else while keeping
+  the same figure when it gets there;
 - the distribution actually walks (peak total-variation ≈ 0.6 over 300 measures),
   every lane gets used, and at rest the director both decides less often and
   moves less far per measure;
@@ -321,9 +372,9 @@ passages, thin then busy, so a session has a shape rather than a level. Measured
 over four hundred measures the biggest single-measure step is **1.2 bpm** — a
 change you can catch happening is a change that failed.
 
-It will also change **meter** occasionally, and that one cannot be ramped, so it
-happens where a section change belongs: at the thinnest part of a passage, when
-there is least to interrupt.
+Flow no longer touches the **meter**. That is its own switch now — see
+[Moving the bar](#moving-the-bar) — because a meter change is not a slow arc and
+does not belong with the two that are.
 
 A hand on either slider **re-centres** Flow rather than fighting it — your number
 becomes the new anchor. And Flow deliberately leaves alone everything that

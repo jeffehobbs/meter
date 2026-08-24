@@ -9,8 +9,8 @@ settings:
     DEVELOPMENT_TEAM: YKF353373Y
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "5.9"
-    MARKETING_VERSION: "1.0.0"
-    CURRENT_PROJECT_VERSION: "1"
+    MARKETING_VERSION: "1.1.0"
+    CURRENT_PROJECT_VERSION: "2"
     # Universal: Apple Silicon and Intel.
     ARCHS: "$(ARCHS_STANDARD)"
   configs:
@@ -121,5 +121,5 @@ targets:
         CODE_SIGN_ENTITLEMENTS: Sources/iOS/MeterFlow.entitlements
         TARGETED_DEVICE_FAMILY: "1,2"
         SUPPORTS_MACCATALYST: NO
-        MARKETING_VERSION: "1.0.0"
-        CURRENT_PROJECT_VERSION: "1"
+        MARKETING_VERSION: "1.1.0"
+        CURRENT_PROJECT_VERSION: "2"

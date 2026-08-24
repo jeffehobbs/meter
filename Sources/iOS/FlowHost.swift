@@ -39,7 +39,27 @@ final class FlowHost: ObservableObject {
     /// purpose — this is a thing to leave running, and sixty-four attacks a bar
     /// is not something to leave running.
     @Published var budget: Double = 12 {
-        didSet { transport.set(budget: Int(budget)); updateNowPlaying(); save() }
+        didSet { pushBudget(); updateNowPlaying(); save() }
+    }
+
+    /// The bar. Read-only to the interface: there is no meter control on this
+    /// build, and the whole question of this screen is what the machine does
+    /// without being asked.
+    @Published private(set) var signature: Signature = .named("4/4")
+
+    /// How the bar moves on its own, if at all. Off as it ships: see
+    /// `MeterMotion`.
+    @Published var meterMotion: MeterMotion = .fixed {
+        didSet {
+            meterArc.motion = meterMotion
+            meterArc.reanchor(signature)
+            transport.set(rotates: meterMotion.rotatesLanes)
+            // The scaling below depends on this, so the budget has to be pushed
+            // again — otherwise turning the switch on mid-session leaves the
+            // transport holding a number computed under the old rule.
+            pushBudget()
+            save()
+        }
     }
 
     /// Beats per minute. Written by the listener when they are driving, and by
@@ -80,6 +100,10 @@ final class FlowHost: ObservableObject {
     private let director = Director()
     private let composer = Composer()
     private let transport: Transport
+    /// The same arc the Mac app uses, without the rest of Flow: this build owns
+    /// its own tempo and density — one from the listener, one from their pulse —
+    /// and wants none of Flow's opinions about either.
+    private let meterArc = MeterArc()
     private var meterTimer: Timer?
     private var sleepTimer: Timer?
     private var fadeTimer: Timer?
@@ -113,7 +137,10 @@ final class FlowHost: ObservableObject {
         transport.setFeel(swing: 0.14, humanize: 0.42, persistence: 0.76,
                           accent: 0.75, flam: 0.08)
         transport.setDirector(motion: 0.35, spread: 0.55, evolvePatches: true)
-        transport.set(signature: .named("4/4"))
+        transport.set(signature: signature)
+        meterArc.motion = meterMotion
+        meterArc.reanchor(signature)
+        transport.set(rotates: meterMotion.rotatesLanes)
         transport.set(budget: Int(budget))
         transport.set(bpm: tempo)
         transport.set(route: .synth)
@@ -130,6 +157,7 @@ final class FlowHost: ObservableObject {
                 self.measure = measure
                 self.shares = tick.shares
                 self.applyDrift(tick)
+                self.applyMeter(measure)
                 self.lastTick = tick
                 self.history.append(MeasureSnapshot(
                     index: measure.index, spent: measure.spent, counts: measure.counts,
@@ -534,6 +562,40 @@ final class FlowHost: ObservableObject {
     // MARK: - Cadence
 
     /// The rack, drifting. The phone has no rack panel, so this is the only
+    /// Attacks per bar, scaled to how long the bar currently is.
+    ///
+    /// The slider is the listener's, and a machine that moves it is a machine
+    /// that has taken something. So the slider keeps meaning "this dense, at
+    /// four-four" and the scaling happens on the way to the transport: a bar
+    /// that is a quarter longer gets a quarter more attacks and comes out at the
+    /// same attacks per second. Without this, a meter change arrives wearing a
+    /// density change, and the two together read as an edit rather than as a
+    /// meter change.
+    ///
+    /// Only when the motion asks for it. With nothing turned on, the budget is
+    /// attacks per bar and nothing else, exactly as before.
+    private func pushBudget() {
+        let scale = meterMotion.holdsDensity
+            ? Double(signature.ticks) / Double(Signature.named("4/4").ticks)
+            : 1
+        transport.set(budget: max(1, Int((budget * scale).rounded())))
+    }
+
+    /// One bar of the meter arc.
+    ///
+    /// There is no Flow on this build to ask whether the music has thinned out —
+    /// the density is a slider — so the test is `MeterArc.isQuiet` alone.
+    private func applyMeter(_ measure: Measure) {
+        guard meterMotion.changesSignature else { return }
+        let decision = meterArc.advance(current: signature,
+                                        quiet: MeterArc.isQuiet(measure))
+        guard let target = decision.signature, target != signature else { return }
+        signature = target
+        transport.set(signature: target, keepFigure: decision.keepsFigure)
+        pushBudget()
+        for note in decision.notes { MomentLog.shared.write(note) }
+    }
+
     /// place the director's slow changes to the lanes take effect.
     private var kit: [DrumVoice: LaneSettings] = [:]
 
@@ -710,6 +772,7 @@ final class FlowHost: ObservableObject {
     private enum Key {
         static let budget = "flow.budget", tempo = "flow.tempo"
         static let follows = "flow.followsPulse", sleep = "flow.sleepMinutes"
+        static let meterMotion = "flow.meterMotion"
     }
 
     private func load() {
@@ -720,6 +783,8 @@ final class FlowHost: ObservableObject {
             tempo = max(40, min(200, defaults.double(forKey: Key.tempo)))
             followsPulse = defaults.bool(forKey: Key.follows)
             sleepMinutes = defaults.integer(forKey: Key.sleep)
+            meterMotion = defaults.string(forKey: Key.meterMotion)
+                .flatMap(MeterMotion.init(rawValue:)) ?? .fixed
         } else {
             followsPulse = true
         }
@@ -731,5 +796,6 @@ final class FlowHost: ObservableObject {
         defaults.set(tempo, forKey: Key.tempo)
         defaults.set(followsPulse, forKey: Key.follows)
         defaults.set(sleepMinutes, forKey: Key.sleep)
+        defaults.set(meterMotion.rawValue, forKey: Key.meterMotion)
     }
 }
