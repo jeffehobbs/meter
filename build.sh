@@ -17,6 +17,8 @@
 #   ./build.sh ios-run    …and install and launch it on the booted one
 #   ./build.sh device     Build, sign and install Meter Flow on the iPhone
 #   ./build.sh log        Pull the marked moments off the iPhone and show them
+#   ./build.sh testflight Archive Meter Flow → App Store IPA in dist/ios/,
+#                         and upload it if App Store Connect credentials are found
 #
 # `device` signs with automatic provisioning and -allowProvisioningUpdates, which
 # is also what registers the App ID and turns on the capabilities the entitlements
@@ -107,6 +109,199 @@ CONFIG=Debug
 MODE="${1:-debug}"
 [[ "$MODE" == release || "$MODE" == notarize ]] && CONFIG=Release
 DEV_ID="${DEV_ID:-Developer ID Application}"   # codesign matches this as a substring
+# Only `testflight` reads this: an explicit build number, overriding project.yml.
+BUILD_ARG="${2:-}"
+
+# Find an app-specific password without it having to be in the environment.
+#
+# These cannot be recovered from Apple: appleid.apple.com shows the password once,
+# at creation, and never again. Other apps' stored items are probed too, because
+# an app-specific password is **per Apple ID rather than per app** — the one made
+# for Thrum works here unchanged, which is why `thrum-asc` is in the list.
+#
+#   xcrun altool --store-password-in-keychain-item --item meter-asc \
+#     -u you@example.com -p abcd-efgh-ijkl-mnop
+#
+# `--item` is required and altool's own usage line omits it — without it the
+# command fails with "Expected item argument is missing, --item", which reads like
+# the flag is wrong rather than incomplete.
+resolve_asc_password() {
+  if [[ -n "${ASC_APP_PASSWORD:-}" ]]; then
+    echo "$ASC_APP_PASSWORD"
+    return 0
+  fi
+  local candidates=(meter-asc meterflow-asc thrum-asc thrumflow-asc phonotropic-asc mutiny-asc)
+  for item in "${candidates[@]}"; do
+    if security find-generic-password -l "$item" >/dev/null 2>&1 \
+       || security find-generic-password -s "$item" >/dev/null 2>&1; then
+      echo "@keychain:$item"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Meter Flow, to TestFlight.
+#
+# Handled before the macOS build below and exits, because none of that applies:
+# no universal binary (iOS is arm64 only), no Developer ID, no notarization. App
+# Store builds are signed by Apple's own pipeline after upload, so what leaves
+# here is an unnotarized IPA and that is correct.
+#
+# One build covers iPhone and iPad — TARGETED_DEVICE_FAMILY is "1,2", so there is
+# no second target and no second upload.
+#
+# **This needs an app record in App Store Connect first.** `altool` cannot create
+# one; it has to exist before a build can be attached to it, and the bundle ID
+# (com.jeffhobbs.meterflow) has to match exactly. Without it, validation fails
+# and the IPA is still on disk, which is the right place to stop.
+#
+# Credentials are deliberately not stored here. Either shape works:
+#
+#   App-specific password (what the other iOS apps on this machine use). From
+#   appleid.apple.com → Sign-In and Security → App-Specific Passwords, NOT from
+#   App Store Connect:
+#     ASC_APPLE_ID      your Apple ID email
+#     ASC_APP_PASSWORD  abcd-efgh-ijkl-mnop     (or store it, see above)
+#
+#   Or an API key:
+#     ASC_KEY_ID        the key's ID
+#     ASC_ISSUER_ID     the issuer UUID from the Keys page
+#   with the .p8 in ~/.appstoreconnect/private_keys/AuthKey_<ASC_KEY_ID>.p8
+#
+# The build number can be overridden: `./build.sh testflight 42`. App Store
+# Connect rejects a number it has already seen, and rejects it *after* the upload
+# and a processing wait, which is a slow way to find out.
+# `./build.sh testflight $(date +%s)` sidesteps the question entirely.
+if [[ "$MODE" == "testflight" ]]; then
+  ARCHIVE="build-ios/MeterFlow.xcarchive"
+  EXPORT_DIR="dist/ios"
+  mkdir -p "$EXPORT_DIR" build-ios
+
+  BUILD_ARGS=()
+  if [[ -n "$BUILD_ARG" ]]; then
+    BUILD_ARGS=(CURRENT_PROJECT_VERSION="$BUILD_ARG")
+    echo "▸ Build number overridden: $BUILD_ARG"
+  fi
+
+  echo "▸ Archiving Meter Flow…"
+  # -allowProvisioningUpdates creates or downloads the App Store distribution
+  # profile, and is also what enables HealthKit on the App ID — the same
+  # mechanism the `device` path above relies on.
+  xcodebuild -project Meter.xcodeproj -scheme MeterFlow -configuration Release \
+    -sdk iphoneos -destination 'generic/platform=iOS' \
+    -archivePath "$ARCHIVE" -allowProvisioningUpdates -quiet \
+    "${BUILD_ARGS[@]}" \
+    archive
+
+  # Read the version from the *archive*, not from Sources/iOS/Info.plist.
+  # XcodeGen writes `$(MARKETING_VERSION)` in there as a literal and Xcode
+  # resolves it at build time, so reading it beforehand yields the token rather
+  # than a number. Same lesson as the macOS side naming its zip from the built
+  # bundle: the artifact is the only source of truth for what a build calls itself.
+  ARCHIVED_PLIST="$ARCHIVE/Products/Applications/MeterFlow.app/Info.plist"
+  VER=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$ARCHIVED_PLIST")
+  BUILD_NO=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$ARCHIVED_PLIST")
+  echo "▸ Archived $VER ($BUILD_NO)"
+
+  # `app-store-connect` is the current name; it was `app-store` before Xcode
+  # 15.3 and the old value now warns.
+  cat > build-ios/ExportOptions.plist <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key><string>app-store-connect</string>
+  <key>teamID</key><string>YKF353373Y</string>
+  <key>uploadSymbols</key><true/>
+  <key>destination</key><string>export</string>
+</dict>
+</plist>
+PLIST
+
+  echo "▸ Exporting IPA…"
+  xcodebuild -exportArchive -archivePath "$ARCHIVE" \
+    -exportOptionsPlist build-ios/ExportOptions.plist \
+    -exportPath "$EXPORT_DIR" -allowProvisioningUpdates -quiet
+
+  RAW_IPA=$(ls "$EXPORT_DIR"/MeterFlow.ipa 2>/dev/null | head -1)
+  [[ -n "$RAW_IPA" ]] || { echo "✗ No IPA produced." >&2; exit 1; }
+
+  # Re-read the build number from the *exported* IPA, because export can change
+  # it: Xcode asks App Store Connect what it has already seen and silently bumps
+  # past it, so the archive's number and the uploaded one need not agree.
+  EXPORTED_BUILD_NO=$(unzip -p "$RAW_IPA" 'Payload/MeterFlow.app/Info.plist' 2>/dev/null \
+    | plutil -extract CFBundleVersion raw -o - - 2>/dev/null) || true
+  if [[ -n "$EXPORTED_BUILD_NO" && "$EXPORTED_BUILD_NO" != "$BUILD_NO" ]]; then
+    echo "▸ Export bumped the build number: $BUILD_NO → $EXPORTED_BUILD_NO (App Store Connect had already seen $BUILD_NO)."
+    BUILD_NO="$EXPORTED_BUILD_NO"
+  fi
+  # Versioned filename, matching the macOS convention — an unversioned artifact
+  # is how you upload yesterday's build.
+  IPA="$EXPORT_DIR/MeterFlow-$VER-$BUILD_NO.ipa"
+  mv -f "$RAW_IPA" "$IPA"
+  echo "▸ Exported: $IPA"
+
+  # Two credential shapes, one upload. Validate first in both cases: it catches
+  # the whole ITMS-9xxxx family — a missing privacy-manifest declaration, an icon
+  # with an alpha channel, an entitlement the profile cannot carry, a missing app
+  # record — in about a minute, against finding out by email a quarter of an hour
+  # after uploading.
+  AUTH=()
+  ASC_APPLE_ID="${ASC_APPLE_ID:-}"
+  ASC_PW="$(resolve_asc_password || true)"
+  if [[ -n "$ASC_APPLE_ID" && -n "$ASC_PW" ]]; then
+    AUTH=(-u "$ASC_APPLE_ID" -p "$ASC_PW")
+    if [[ "$ASC_PW" == @keychain:* ]]; then
+      echo "▸ Using the app-specific password in the keychain (${ASC_PW#@keychain:}) for $ASC_APPLE_ID."
+    else
+      echo "▸ Using the app-specific password from the environment for $ASC_APPLE_ID."
+    fi
+  elif [[ -n "${ASC_KEY_ID:-}" && -n "${ASC_ISSUER_ID:-}" ]]; then
+    AUTH=(--apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID")
+    echo "▸ Using the App Store Connect API key $ASC_KEY_ID."
+  fi
+
+  if (( ${#AUTH[@]} )); then
+    echo "▸ Validating…"
+    if xcrun altool --validate-app -f "$IPA" -t ios "${AUTH[@]}"; then
+      if [[ "${VALIDATE_ONLY:-0}" == "1" ]]; then
+        echo "▸ Validated. Not uploading (VALIDATE_ONLY=1)."
+      else
+        echo "▸ Uploading to App Store Connect…"
+        xcrun altool --upload-app -f "$IPA" -t ios "${AUTH[@]}"
+        echo "▸ Uploaded. Processing takes a few minutes before it appears in"
+        echo "  TestFlight; Apple emails when it finishes. Testers are added there,"
+        echo "  not here."
+      fi
+    else
+      echo "✗ Validation failed — not uploading. The IPA is still at $IPA." >&2
+      echo "  If it says the app cannot be found, the App Store Connect record" >&2
+      echo "  does not exist yet: create it at appstoreconnect.apple.com with" >&2
+      echo "  bundle ID com.jeffhobbs.meterflow, then run this again." >&2
+      exit 1
+    fi
+  else
+    echo "▸ Not uploading — no credentials found."
+    if [[ -z "$ASC_APPLE_ID" ]]; then
+      echo "  Missing ASC_APPLE_ID (your Apple ID email):  export ASC_APPLE_ID=\"you@example.com\""
+    fi
+    if [[ -z "$ASC_PW" ]]; then
+      echo "  Missing the app-specific password. Make one at appleid.apple.com →"
+      echo "  Sign-In and Security → App-Specific Passwords (it is shown once), then:"
+      echo "    xcrun altool --store-password-in-keychain-item --item meter-asc \\"
+      echo "      -u \"\$ASC_APPLE_ID\" -p abcd-efgh-ijkl-mnop"
+      echo "  after which this script finds it by itself, forever."
+    fi
+    echo "  Or upload the IPA on disk by hand:"
+    echo "    xcrun altool --upload-app -f \"$IPA\" -t ios -u <apple-id> -p @keychain:thrum-asc"
+  fi
+  echo
+  echo "  Next upload needs a build number App Store Connect has not seen: bump"
+  echo "  CURRENT_PROJECT_VERSION in project.yml, or run"
+  echo "    ./build.sh testflight \$(date +%s)"
+  exit 0
+fi
 
 # Anything shipped is built for both architectures, and that needs an explicit
 # generic destination: left to itself xcodebuild resolves "My Mac" to the first
