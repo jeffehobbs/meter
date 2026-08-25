@@ -440,12 +440,14 @@ final class MeterEngine: ObservableObject {
     /// The time is re-derived only when the tempo has actually moved a useful
     /// amount. A delay line asked to change length re-reads its buffer at a
     /// different rate and warbles, so nudging it on every small tempo change —
-    /// which is what following a pulse produces — is audible as a fault.
+    /// which is what following a pulse produces — is audible as a fault. When
+    /// it does move it goes through `glideDelay`, which ducks the wet signal
+    /// across the change instead of letting the line jump.
     private func syncDelay() {
         audio.delayMix = Float(min(100, max(0, echo)))
         let target = min(2, (60.0 / max(30, bpm)) * 0.75)
         if abs(target - audio.delaySeconds) / max(0.05, audio.delaySeconds) > 0.06 {
-            audio.delaySeconds = target
+            audio.glideDelay(to: target)
         }
     }
 

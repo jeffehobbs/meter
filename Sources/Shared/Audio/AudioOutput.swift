@@ -88,9 +88,71 @@ final class AudioOutput {
     private var synthRate: Double = 48_000
 
     var reverbMix: Float = 14 { didSet { reverb.wetDryMix = max(0, min(100, reverbMix)) } }
-    var delayMix: Float = 0 { didSet { delay.wetDryMix = max(0, min(100, delayMix)) } }
+    var delayMix: Float = 0 { didSet { applyDelayMix() } }
     var delayFeedback: Float = 34 { didSet { delay.feedback = max(0, min(90, delayFeedback)) } }
     var delaySeconds: Double = 0.3 { didSet { delay.delayTime = min(2, max(0.02, delaySeconds)) } }
+
+    /// How much of the echo is momentarily audible, 0 … 1, while its time is
+    /// being moved. Owned by `glideDelay`; separate from `delayMix` so that the
+    /// host writing its intended depth mid-glide does not undo the duck.
+    private var delayDuck: Float = 1
+    private var delayGlide: Timer?
+
+    private func applyDelayMix() {
+        delay.wetDryMix = max(0, min(100, delayMix * delayDuck))
+    }
+
+    /// Move the echo's time without a click.
+    ///
+    /// `AVAudioUnitDelay` repositions its read pointer the instant `delayTime`
+    /// is written: whatever is in the line jumps, which is a click at best and
+    /// a tape-stop warble at worst, and there is no parameter ramp to ask an
+    /// Apple delay for. So the change is hidden rather than smoothed — the wet
+    /// signal is faded down, the time is moved while none of it is audible, and
+    /// it is faded back. For half a second the echo thins out; it never breaks.
+    ///
+    /// This matters more than it sounds like it should, because a tempo that
+    /// follows a pulse moves all evening, and every re-derivation of a
+    /// tempo-synced delay used to land as a fault in the one part of the mix
+    /// that is pure tail.
+    func glideDelay(to seconds: Double, over duration: Double = 0.5) {
+        let target = min(2, max(0.02, seconds))
+        delayGlide?.invalidate()
+        delayGlide = nil
+        // Nothing to hide when the echo is silent or the graph is stopped, and
+        // a fade would only delay the change.
+        guard duration > 0, delayMix > 0, engine.isRunning else {
+            delayDuck = 1
+            delaySeconds = target
+            applyDelayMix()
+            return
+        }
+        guard abs(target - delaySeconds) > 0.0005 else { return }
+        let started = Date()
+        var moved = false
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            let progress = min(1, Date().timeIntervalSince(started) / duration)
+            if progress >= 0.5 && !moved {
+                moved = true
+                self.delaySeconds = target
+            }
+            // A V: all the way down at the half-way point, back up by the end.
+            self.delayDuck = Float(abs(progress - 0.5) * 2)
+            self.applyDelayMix()
+            if progress >= 1 {
+                if !moved { self.delaySeconds = target }
+                self.delayDuck = 1
+                self.applyDelayMix()
+                t.invalidate()
+                self.delayGlide = nil
+            }
+        }
+        delayGlide = timer
+        // `.common`, so a finger on the screen does not stall the fade half way
+        // down and leave the echo missing.
+        RunLoop.main.add(timer, forMode: .common)
+    }
 
     var sampleRate: Double { engine.outputNode.outputFormat(forBus: 0).sampleRate }
     var isRunning: Bool { engine.isRunning }

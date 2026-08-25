@@ -10,6 +10,7 @@ swiftc -O -o build/check \
   Sources/Shared/Support/*.swift Sources/Shared/Model/*.swift \
   Sources/Shared/Composition/*.swift \
   Sources/Shared/Audio/DrumSynth.swift Sources/Shared/Audio/AudioOutput.swift \
+  Sources/Shared/Engine/Transport.swift Sources/Shared/MIDI/MIDIOut.swift \
   Tools/main.swift \
-  -framework AVFoundation
+  -framework AVFoundation -framework CoreMIDI
 ./build/check

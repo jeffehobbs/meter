@@ -131,6 +131,23 @@ they made an instrument whose timing you could not trust — which is a differen
 and much worse thing than an instrument that evolves. The line is now explicit:
 **the director changes what things sound like, never when they happen.**
 
+The tempo is the one exception, since something has to be allowed to move it —
+Flow at a section, or your own pulse on the phone. So it is the one thing that
+**glides**: the clock is given a target rather than a value and approaches it
+over a second or so, and every re-arm of the timer is measured from where the
+tick belonged on the grid rather than from the moment it was asked. Re-arming
+from *now* restarts the tick already in progress, which displaces everything
+after it by up to a tick — inaudible once, and a beat that jostles when a pulse
+moves the tempo every few seconds. `Tools/check.sh` measures it: 24% between
+neighbouring sixteenths before, 5% after, which is the jitter of the
+measurement rather than of the clock.
+
+The echo is tempo-synced, so it has to move too, and `AVAudioUnitDelay` has no
+parameter ramp — writing `delayTime` jumps the read pointer, which is a click at
+best. Its time is therefore re-derived only when the tempo has really gone
+somewhere, and when it does the wet signal is ducked across the change: the echo
+thins out for a quarter of a second instead of breaking.
+
 The room does not drift either, for the same reason it never did: it is the space
 the kit lives in, and a space that keeps changing size is not a space.
 

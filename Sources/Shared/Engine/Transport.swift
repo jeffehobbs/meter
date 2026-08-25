@@ -40,7 +40,31 @@ final class Transport {
     private(set) var isRunning = false
 
     // Mirrored parameters, owned by the queue.
+    /// The tempo the clock is running at, and the one it is heading for.
+    ///
+    /// Nothing writes a tempo straight onto the clock any more. A host that
+    /// follows a pulse hands over a new figure every few seconds and the
+    /// director hands one over at a section, and both used to land as a step:
+    /// the timer was cancelled and re-armed from *now*, which threw away
+    /// whatever was left of the tick in progress and pushed the whole grid
+    /// after it later by up to a tick. Once every few seconds, against an echo
+    /// running at a fixed time, that reads as the beat jostling. So the tempo
+    /// glides toward the target on the clock's own thread, and every re-arm is
+    /// measured from the last tick rather than from the moment somebody asked.
     private var bpm: Double = 112
+    private var targetBpm: Double = 112
+    /// Seconds for the glide to close about two thirds of the distance. Long
+    /// enough to read as the music changing its mind rather than as an edit,
+    /// short enough that a slider still feels connected to something.
+    private static let glideTau: Double = 1.0
+    /// The slowest the glide is allowed to crawl, in bpm per second, so the
+    /// last fraction of a beat does not take all evening.
+    private static let glideFloor: Double = 0.06
+    /// Where the last tick belonged on the grid — not when its handler
+    /// happened to run — and the interval the source is armed with.
+    private var tickAnchor: DispatchTime = .now()
+    private var armedInterval: Double = 0
+    private var timerResumed = false
     private var budget: Int = 14
     private var route: Route = .synth
     private var kit: [DrumVoice: LaneSettings] = [:]
@@ -65,12 +89,18 @@ final class Transport {
 
     // MARK: - Parameters
 
-    func set(bpm value: Double) {
+    /// Head for a tempo. `glide` off arrives at once, for the cases where
+    /// there is nothing to glide from — loading a document, or a machine that
+    /// has not started yet.
+    func set(bpm value: Double, glide: Bool = true) {
         queue.async {
-            self.bpm = min(240, max(30, value))
-            if self.isRunning { self.restartTimer() }
+            self.targetBpm = min(240, max(30, value))
+            guard !glide || !self.isRunning else { return }
+            self.bpm = self.targetBpm
+            if self.isRunning { self.arm() }
         }
     }
+
 
     func set(budget value: Int) { queue.async { self.budget = max(0, min(256, value)) } }
     func set(route value: Route) {
@@ -172,7 +202,8 @@ final class Transport {
             self.pendingFlams.removeAll()
             self.pendingOffs.removeAll()
             self.midi.start()
-            self.restartTimer()
+            self.bpm = self.targetBpm
+            self.arm(resettingPhase: true)
         }
     }
 
@@ -180,8 +211,7 @@ final class Transport {
         queue.async {
             guard self.isRunning else { return }
             self.isRunning = false
-            self.timer?.cancel()
-            self.timer = nil
+            self.cancelTimer()
             self.midi.stop()
             self.allNotesOff()
             self.synth.silence()
@@ -193,8 +223,7 @@ final class Transport {
     func shutdown() {
         queue.sync {
             self.isRunning = false
-            self.timer?.cancel()
-            self.timer = nil
+            self.cancelTimer()
             self.midi.stop()
             self.allNotesOff()
         }
@@ -202,24 +231,86 @@ final class Transport {
 
     private var tickSeconds: Double { 60.0 / bpm / Double(ticksPerQuarter) }
 
-    /// A repeating timer rather than one shot per tick: dispatch schedules a
-    /// repeating source from its original deadline, so it does not accumulate
-    /// drift, and at 96 PPQN a fresh source every five milliseconds would be
-    /// pure overhead. Tempo changes cancel and re-arm, which costs less than a
-    /// tick of phase.
-    private func restartTimer() {
-        timer?.cancel()
+    /// One step of the tempo glide, run on the clock itself so it moves with
+    /// the music rather than with whatever rate the interface publishes at.
+    ///
+    /// Exponential, with a floor: a tempo that has somewhere to go covers most
+    /// of the distance in a second or so and then eases in, which is what a
+    /// tempo change sounds like when a person makes one.
+    private func glideTempo(over elapsed: Double) {
+        guard bpm != targetBpm else { return }
+        let distance = targetBpm - bpm
+        if abs(distance) < 0.01 {
+            bpm = targetBpm
+        } else {
+            let eased = distance * min(1, elapsed / Self.glideTau)
+            let crawl = Self.glideFloor * elapsed * (distance < 0 ? -1 : 1)
+            bpm += abs(eased) > abs(crawl) ? eased : crawl
+            // Never step past the target, however coarse the tick.
+            if (targetBpm - bpm) * distance < 0 { bpm = targetBpm }
+        }
+        // Re-arming the source is a system call, so it happens when the glide
+        // has moved the interval by a fifth of a percent rather than on every
+        // tick. Below that the difference is a couple of microseconds.
+        guard armedInterval > 0,
+              abs(tickSeconds - armedInterval) / armedInterval > 0.002 else { return }
+        arm()
+    }
+
+    /// Point the clock at its next tick.
+    ///
+    /// A repeating source rather than one shot per tick: dispatch schedules the
+    /// repeats from the original deadline, so it does not accumulate drift, and
+    /// at 96 PPQN a fresh source every five milliseconds would be pure
+    /// overhead. The source is made once and re-armed in place, and the
+    /// deadline comes off the grid rather than off `.now()` — which is the
+    /// whole difference between a tempo change and a stumble. Re-arming from
+    /// now restarts the tick that was already part-way through, so every tempo
+    /// change nudged the grid later by whatever was left of it; re-arming from
+    /// the moment the handler *ran* is just as wrong the other way, since a
+    /// glide re-arms dozens of times a second and each one would fold its own
+    /// scheduling latency in for good.
+    private func arm(resettingPhase: Bool = false) {
         let interval = tickSeconds
-        let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + interval, repeating: interval,
-                   leeway: .nanoseconds(200_000))
-        t.setEventHandler { [weak self] in self?.tick() }
-        timer = t
-        t.resume()
+        armedInterval = interval
+        let source: DispatchSourceTimer
+        if let existing = timer {
+            source = existing
+        } else {
+            let fresh = DispatchSource.makeTimerSource(queue: queue)
+            fresh.setEventHandler { [weak self] in self?.tick() }
+            timer = fresh
+            source = fresh
+        }
+        let now = DispatchTime.now()
+        if resettingPhase { tickAnchor = now }
+        // A shortened interval can put the next tick in the past. That tick is
+        // simply due, so it goes out now rather than being skipped.
+        let deadline = max(tickAnchor + interval, now)
+        source.schedule(deadline: deadline, repeating: interval,
+                        leeway: .nanoseconds(200_000))
+        if !timerResumed {
+            timerResumed = true
+            source.resume()
+        }
+    }
+
+    private func cancelTimer() {
+        timer?.cancel()
+        timer = nil
+        timerResumed = false
+        armedInterval = 0
     }
 
     private func tick() {
         guard isRunning else { return }
+        // Where this tick belonged, rather than when its handler got to run.
+        tickAnchor = tickAnchor + armedInterval
+        // If the grid has fallen a long way behind — the app suspended, the
+        // queue stalled — there is nothing to be gained by playing the ticks
+        // that were missed, so it starts again from here.
+        if tickAnchor + 0.25 < DispatchTime.now() { tickAnchor = .now() }
+        glideTempo(over: armedInterval)
 
         if tickInMeasure == 0 { beginMeasure() }
 

@@ -122,11 +122,19 @@ struct Patch: Codable, Identifiable, Hashable {
               cutoffHz: 1_050, resonance: 0.58, pingLevel: 0.85,
               level: 0.72, drive: 1.35),
 
+        // A resonant lowpass is the one filter mode in the rack whose output is
+        // not gain-compensated, and this patch was asking for a Q of twenty at
+        // 420 Hz — twenty-odd decibels of ring, on noise, in the band the ear
+        // is least forgiving about. It measured as two to three times the
+        // 250–800 Hz energy of anything else in the bank, which is why it
+        // arrived over the top of the kit rather than underneath it. Less
+        // resonance, less noise into it, and a shorter tail: still the low
+        // crushed one, no longer the loudest thing in the room.
         Patch(name: "Rumble", baseHz: 68, ratio: 0.51, fmIndex: 1.1, fmDecay: 0.08,
-              drop: 0.6, dropTime: 0.06, fold: 0.2, bodyDecay: 0.3, bodyLevel: 0.7,
-              noiseLevel: 0.85, noiseDecay: 0.22, filterMode: .lowpass,
-              cutoffHz: 420, resonance: 0.55, cutoffSweep: 2.0, crush: 0.45,
-              level: 0.8, drive: 1.5),
+              drop: 0.6, dropTime: 0.06, fold: 0.2, bodyDecay: 0.28, bodyLevel: 0.6,
+              noiseLevel: 0.62, noiseDecay: 0.16, filterMode: .lowpass,
+              cutoffHz: 420, resonance: 0.30, cutoffSweep: 2.0, crush: 0.32,
+              level: 0.68, drive: 1.35),
 
         Patch(name: "Grit", baseHz: 180, bodyLevel: 0,
               noiseLevel: 1.0, noiseDecay: 0.11, filterMode: .bandpass,

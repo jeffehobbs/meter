@@ -633,17 +633,20 @@ final class FlowHost: ObservableObject {
     ///
     /// Both of those used to drift, and the drift is what made the app's timing
     /// unreliable — an echo whose depth and subdivision are both moving is a
-    /// second rhythm you did not ask for. The time is re-derived only when the
-    /// tempo has moved a useful amount, because a delay line asked to change
-    /// length mid-repeat warbles, and following a pulse changes the tempo every
-    /// few seconds.
+    /// second rhythm you did not ask for.
+    ///
+    /// The time is still re-derived only when the tempo has moved a useful
+    /// amount, since a delay line asked to change length mid-repeat has to be
+    /// interrupted to do it and following a pulse moves the tempo all evening.
+    /// When it does move, it moves through `glideDelay`, which ducks the wet
+    /// signal for half a second rather than letting the line jump under it.
     private static let echoAmount: Float = 14
 
     private func syncEcho() {
         audio.delayMix = Self.echoAmount
         let target = min(2, (60.0 / max(30, tempo)) * 0.75)
         if abs(target - audio.delaySeconds) / max(0.05, audio.delaySeconds) > 0.06 {
-            audio.delaySeconds = target
+            audio.glideDelay(to: target)
         }
     }
 

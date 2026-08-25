@@ -569,7 +569,14 @@ extension Trigger {
         bodyDecay = p.bodyDecay * decay
         bodyLevel = p.bodyLevel
 
-        noiseLevel = p.noiseLevel * grit
+        // Grit above unity used to be an unbounded gain on the noise channel,
+        // which on a patch that is mostly noise is a volume control — and in
+        // front of a resonant filter it is a volume control with the filter's
+        // gain after it. Above unity it still opens up, with diminishing
+        // returns and a ceiling: the top of the knob is dirtier rather than
+        // louder, which is what the macro is for. Crush is deliberately left
+        // to take the full range, since that is the dirt.
+        noiseLevel = p.noiseLevel * (grit <= 1 ? grit : min(1.2, 1 + (grit - 1) * 0.4))
         noiseDecay = p.noiseDecay * decay
         filterMode = Int32(p.filterMode.rawValue)
         // A struck filter's cutoff is its pitch, so it takes the ring ceiling;

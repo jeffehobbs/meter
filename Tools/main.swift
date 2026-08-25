@@ -781,5 +781,72 @@ do {
     }
 }
 
+print("\n── the clock ──────────────────────────────────────────")
+
+// The one real-time section. Everything above is rendered offline, but a
+// tempo change is a scheduling question and there is no offline way to ask it:
+// the bug this exists to catch is a tempo change that re-arms the timer from
+// *now* and so displaces the grid by whatever was left of the tick in
+// progress. Once every few seconds, which is what following a pulse produces,
+// that is the beat jostling.
+//
+// Steps arrive on the main queue, so the figures carry a couple of
+// milliseconds of run-loop jitter; the tolerances below are set well outside
+// it and the assertions are about drift and arrival rather than about any one
+// interval.
+do {
+    let synth = DrumSynth()
+    synth.prepare(sampleRate: 48_000)
+    let transport = Transport(synth: synth, midi: MIDIOut(),
+                              director: Director(), composer: Composer())
+    var stamps: [Double] = []
+    let t0 = Date()
+    transport.onStep = { _, _ in stamps.append(Date().timeIntervalSince(t0)) }
+    transport.set(bpm: 100, glide: false)
+    transport.set(budget: 8)
+    transport.set(route: .synth)
+    transport.start()
+
+    Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { _ in transport.set(bpm: 130) }
+    RunLoop.main.run(until: Date().addingTimeInterval(12))
+    transport.stop()
+
+    func tempo(between start: Double, and end: Double) -> Double {
+        let window = stamps.filter { $0 >= start && $0 <= end }
+        guard let first = window.first, let last = window.last, window.count > 2 else { return 0 }
+        // Four sixteenths to the beat.
+        return 60 * Double(window.count - 1) / ((last - first) * 4)
+    }
+
+    let steady = tempo(between: 0.5, and: 2.9)
+    check("the clock holds the tempo it was given",
+          abs(steady - 100) < 0.6, String(format: "%.2f bpm over 2.4s, asked for 100", steady))
+
+    let arrived = tempo(between: 8, and: 11.9)
+    check("a tempo change arrives where it was sent",
+          abs(arrived - 130) < 1.0, String(format: "%.2f bpm, asked for 130", arrived))
+
+    // The glide itself: every sixteenth through the change, and none of them
+    // out of line with its neighbours. A grid that has been displaced shows up
+    // here as one interval far longer than the two either side of it.
+    var worst = 0.0
+    var worstAt = 0.0
+    for i in 2..<stamps.count {
+        let before = stamps[i - 1] - stamps[i - 2]
+        let after = stamps[i] - stamps[i - 1]
+        let jump = abs(after - before) / before
+        if jump > worst { worst = jump; worstAt = stamps[i] }
+    }
+    check("no step is displaced by the change",
+          worst < 0.09, String(format: "worst neighbouring sixteenths differ by %.1f%% (t=%.2fs)",
+                               worst * 100, worstAt))
+
+    // And it is a glide rather than a jump: partway through, the tempo has to
+    // be somewhere between the two.
+    let midway = tempo(between: 3.4, and: 4.0)
+    check("the tempo glides rather than jumps",
+          midway > 103 && midway < 127, String(format: "%.2f bpm half a second in", midway))
+}
+
 print("\n\(failures == 0 ? "all checks passed" : "\(failures) check(s) failed")\n")
 exit(failures == 0 ? 0 : 1)
