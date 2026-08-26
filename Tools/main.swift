@@ -514,7 +514,7 @@ func tonality(_ trigger: Trigger) -> (hz: Double, prominence: Double, tail: Doub
     while written < n {
         let frames = min(512, n - written)
         for lane in 0..<lanes {
-            synth.render(lane: lane, frames: frames, into: buses + lane * stride)
+            synth.render(lane: lane, frames: frames, at: -1, into: buses + lane * stride)
         }
         for i in 0..<frames {
             var v: Float = 0
@@ -612,7 +612,7 @@ func renderOne(_ trigger: Trigger, seconds: Double = 3.0) -> (peak: Float, rms: 
         // stage is what mixes them, so measuring the rack alone means asking for
         // each lane and summing them here.
         for lane in 0..<lanes {
-            synth.render(lane: lane, frames: frames, into: buses + lane * stride)
+            synth.render(lane: lane, frames: frames, at: -1, into: buses + lane * stride)
         }
         for i in 0..<frames {
             var v: Float = 0
@@ -779,6 +779,74 @@ do {
               String(format: "peak %.3f, rms %.3f, %d clipped, %.1fs of %d meters",
                      m.peak, m.rms, m.clipped, m.seconds, m.meters))
     }
+}
+
+// MARK: - Where a hit actually lands
+//
+// A hit is handed to the graph ahead of time and carries the moment it should be
+// heard. What is checked here is that it is heard *then* — on the sample the
+// clock asked for, not on the boundary of whichever buffer happened to notice
+// it. That was the bug: the voice started wherever the next render callback
+// drained the queue, so every hit was displaced by up to a whole buffer and each
+// lane was displaced by a different amount. At a steady tempo the displacement
+// is nearly constant and passes for latency; when the tempo moves — which, when
+// the app is following a pulse, is all the time — the hits sweep through the
+// buffer and wrap round, and that wrap is audible as a stumble.
+
+print("\n── placement ──────────────────────────────────────────")
+
+do {
+    let rate = 48_000.0
+    let frames = 512
+    let lanes = DrumVoice.allCases.count
+    let stride = frames
+
+    /// The sample a hit asked for at `at`, against the sample it sounded on.
+    func onset(askingFor delay: Double) -> (asked: Int, got: Int) {
+        let synth = DrumSynth()
+        synth.prepare(sampleRate: rate)
+        synth.masterVolume = 1
+        let start = 1_000.0                     // an arbitrary point on the clock
+        synth.triggers.push(Trigger(at: start + delay, voice: .bass,
+                                    lane: .default(for: .bass), velocity: 1))
+        let buses = UnsafeMutablePointer<Float>.allocate(capacity: lanes * stride)
+        defer { buses.deallocate() }
+
+        var rendered = 0
+        var got = -1
+        // Six buffers is well past any delay asked for below.
+        for buffer in 0..<6 {
+            let playout = start + Double(buffer * frames) / rate
+            for lane in 0..<lanes {
+                synth.render(lane: lane, frames: frames, at: playout,
+                             into: buses + lane * stride)
+            }
+            if got < 0 {
+                for i in 0..<frames where abs(buses[Int(Trigger.laneIndex[.bass] ?? 0) * stride + i]) > 0.0005 {
+                    got = rendered + i
+                    break
+                }
+            }
+            rendered += frames
+        }
+        return (Int((delay * rate).rounded()), got)
+    }
+
+    // Deliberately not multiples of the buffer: the point is the samples in
+    // between, which is everything the old arrangement could not express.
+    for delay in [0.0031, 0.0107, 0.0213, 0.0400] {
+        let r = onset(askingFor: delay)
+        let error = abs(r.got - r.asked)
+        check(String(format: "a hit asked for at %.1f ms lands there", delay * 1000),
+              r.got >= 0 && error <= 1,
+              "asked for sample \(r.asked), sounded on \(r.got)")
+    }
+
+    // And a moment already gone is played at once rather than dropped, which is
+    // what an audition and a hit that missed its buffer both rely on.
+    let past = onset(askingFor: -0.5)
+    check("a hit whose moment has gone is not lost", past.got == 0,
+          "sounded on sample \(past.got)")
 }
 
 print("\n── the clock ──────────────────────────────────────────")

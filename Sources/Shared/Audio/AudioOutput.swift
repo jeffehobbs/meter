@@ -229,8 +229,15 @@ final class AudioOutput {
         laneNodes.removeAll()
 
         for index in DrumVoice.allCases.indices {
-            let node = AVAudioSourceNode(format: mono) { [self] _, _, frameCount, audioBufferList in
-                render(lane: index, frames: Int(frameCount), into: audioBufferList)
+            let node = AVAudioSourceNode(format: mono) { [self] _, timestamp, frameCount, audioBufferList in
+                // The moment this buffer will be heard. Manual rendering has no
+                // such moment and says so, and a hit with nowhere to be placed
+                // falls back to starting at the top of the buffer.
+                let stamp = timestamp.pointee
+                let playout = stamp.mFlags.contains(.hostTimeValid) && stamp.mHostTime > 0
+                    ? AVAudioTime.seconds(forHostTime: stamp.mHostTime) : -1
+                return render(lane: index, frames: Int(frameCount), at: playout,
+                              into: audioBufferList)
             }
             engine.attach(node)
             engine.connect(node, to: environment, format: mono)
@@ -253,12 +260,13 @@ final class AudioOutput {
     /// pulls its source on its own schedule with its own frame count — so any
     /// scheme where one callback renders for all of them is wrong on a phone,
     /// however well it measures on a Mac.
-    private func render(lane: Int, frames: Int, into audioBufferList: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
+    private func render(lane: Int, frames: Int, at playout: Double,
+                        into audioBufferList: UnsafeMutablePointer<AudioBufferList>) -> OSStatus {
         let list = UnsafeMutableAudioBufferListPointer(audioBufferList)
         guard let destination = list.first?.mData?.assumingMemoryBound(to: Float.self) else {
             return noErr
         }
-        synth.render(lane: lane, frames: frames, into: destination)
+        synth.render(lane: lane, frames: frames, at: playout, into: destination)
         if lane == 0 { cycles += 1 }
         return noErr
     }

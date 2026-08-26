@@ -5,6 +5,15 @@ import Foundation
 /// into these numbers, so the audio path never reads a patch, a dictionary or a
 /// string.
 struct Trigger {
+    /// When this hit should be *heard*, in mach uptime seconds — the same clock
+    /// the engine timestamps its buffers with.
+    ///
+    /// A hit used to have no time at all: it was pushed onto a queue and the
+    /// voice started wherever the next render callback happened to drain it,
+    /// which on a phone is up to a buffer away and a different distance for
+    /// every lane. Zero still means "as soon as possible", which is what an
+    /// audition wants.
+    var at: Double = 0
     var lane: Int32 = 0
     /// Lanes whose ringing tail this hit cuts short, as a bitmask of lanes.
     /// A closed tick landing on an open sustain is the canonical case.
@@ -61,6 +70,10 @@ final class DrumSynth {
     private struct Voice {
         var active = false
         var lane: Int32 = 0
+        /// The sample within the current buffer where this voice starts. Set
+        /// once, when the voice is triggered, and cleared by the buffer that
+        /// honors it.
+        var startOffset: Int32 = 0
         var age: Int32 = 0            // frames since trigger, for voice stealing
 
         // Oscillator pair
@@ -147,10 +160,19 @@ final class DrumSynth {
 
     deinit { voices.deallocate() }
 
-    func prepare(sampleRate: Double) { self.sampleRate = sampleRate }
+    func prepare(sampleRate: Double) {
+        self.sampleRate = sampleRate
+        // A rebuilt graph is a new route, and a new route has its own latency.
+        scheduleLead = 0
+    }
 
     func silence() {
         for v in 0..<Self.maxVoices { voices[v].active = false }
+        // Hits are handed over a lead-time ahead of being heard, so stopping
+        // has to throw away the ones already in flight — otherwise a stop, or
+        // the end of a sleep timer, is followed by a tenth of a second of kit.
+        triggers.drain { _ in }
+        pendingCount = 0
     }
 
     // MARK: - Render
@@ -190,8 +212,17 @@ final class DrumSynth {
     ///
     /// A lane's voices touch no state but their own, so there is nothing to
     /// coordinate — which is the version that should have been written first.
-    func render(lane: Int, frames: Int, into out: UnsafeMutablePointer<Float>) {
-        drainTriggers()
+    func render(lane: Int, frames: Int, at playout: Double,
+                into out: UnsafeMutablePointer<Float>) {
+        collect()
+        if playout > 0 {
+            measureLead(playout: playout, frames: frames)
+            startDue(lane: lane, playout: playout, frames: frames)
+        } else {
+            // No usable clock — offline rendering, where a buffer has no
+            // moment it will be heard at. Everything waiting is simply due.
+            startAll(lane: lane)
+        }
 
         for f in 0..<frames { out[f] = 0 }
 
@@ -201,8 +232,15 @@ final class DrumSynth {
             guard voices[v].active else { continue }
             var voice = voices[v]
             var laneLoudest: Float = 0
+            // Where this voice starts in this buffer. Non-zero only for the
+            // buffer that contains its onset, which is the whole point: a hit
+            // lands on the sample the clock asked for rather than on the
+            // boundary that happened to notice it.
+            let from = Int(voice.startOffset)
+            voice.startOffset = 0
+            if from >= frames { voices[v] = voice; continue }
 
-            for f in 0..<frames {
+            for f in from..<frames {
                 // --- envelopes -------------------------------------------------
                 if voice.attack < 1 {
                     voice.attack = min(1, voice.attack + voice.attackInc)
@@ -369,8 +407,120 @@ final class DrumSynth {
 
     // MARK: - Triggering
 
-    private func drainTriggers() {
-        triggers.drain { [self] t in start(t) }
+    // MARK: - Scheduling
+
+    /// Hits waiting for the buffer they belong in.
+    ///
+    /// The queue the clock writes into is drained by whichever lane the engine
+    /// pulls first — and on iOS every lane sits behind its own converter,
+    /// pulling on its own schedule — so a hit cannot be started there. It
+    /// belongs to one lane at one moment, and that lane may not have been asked
+    /// for that moment yet.
+    private var pending = [Trigger](repeating: Trigger(), count: 192)
+    private var pendingCount = 0
+
+    /// Take everything the clock has written since the last buffer.
+    private func collect() {
+        triggers.drain { [self] t in
+            if pendingCount < pending.count {
+                pending[pendingCount] = t
+                pendingCount += 1
+            } else {
+                // The clock is never expected to run this far ahead of the
+                // graph; if it does, a hit early is better than a hit lost.
+                start(t, offset: 0)
+            }
+        }
+    }
+
+    /// Start this lane's hits that fall inside the buffer about to be rendered,
+    /// each at its own sample.
+    private func startDue(lane: Int, playout: Double, frames: Int) {
+        guard pendingCount > 0 else { return }
+        let ends = playout + Double(frames) / sampleRate
+        var keep = 0
+        for i in 0..<pendingCount {
+            let t = pending[i]
+            guard Int(t.lane) == lane, t.at < ends else {
+                pending[keep] = t
+                keep += 1
+                continue
+            }
+            // A moment already gone is due now rather than dropped: the clock
+            // is never silently disobeyed, and `at == 0` — an audition — is
+            // exactly this case.
+            var offset = 0
+            if t.at > playout {
+                offset = min(frames - 1, Int(((t.at - playout) * sampleRate).rounded()))
+            } else if Self.watching, t.at > 0 {
+                missed += 1
+            }
+            start(t, offset: Int32(offset))
+            if Self.watching, t.at > 0 {
+                let error = abs(playout + Double(offset) / sampleRate - t.at)
+                errorMax = max(errorMax, error)
+                errorSum += error
+                errorCount += 1
+            }
+        }
+        pendingCount = keep
+    }
+
+    /// Offline rendering, where a buffer has no moment it will be heard at, so
+    /// everything waiting for this lane starts at the top of it.
+    private func startAll(lane: Int) {
+        guard pendingCount > 0 else { return }
+        var keep = 0
+        for i in 0..<pendingCount {
+            let t = pending[i]
+            if Int(t.lane) == lane {
+                start(t, offset: 0)
+            } else {
+                pending[keep] = t
+                keep += 1
+            }
+        }
+        pendingCount = keep
+    }
+
+    /// How far ahead of the render call the buffer being rendered will actually
+    /// be heard: the output latency plus whatever the engine is holding. A
+    /// couple of milliseconds into a speaker and a tenth of a second into
+    /// Bluetooth, so it is measured rather than assumed — and the clock has to
+    /// hand its hits over that far in advance for them to be placeable at all.
+    ///
+    /// Held at the largest lead seen since the graph was built and rounded up to
+    /// a whole buffer. A lead that moved with every callback would move the hits
+    /// with it, which is the jitter this whole arrangement exists to remove; it
+    /// is reset by `prepare`, which is what a route change goes through.
+    private(set) var scheduleLead: Double = 0
+
+    private func measureLead(playout: Double, frames: Int) {
+        let lead = playout - Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        // A lead of a second is not a lead, it is a bad timestamp.
+        guard lead > 0, lead < 1 else { return }
+        let buffer = Double(frames) / sampleRate
+        guard buffer > 0, lead + buffer > scheduleLead else { return }
+        scheduleLead = ((lead + buffer) / buffer).rounded(.up) * buffer
+    }
+
+    /// Placement diagnostics, kept only when someone is watching. Written on the
+    /// render thread and read once a second by the transport's report —
+    /// deliberately unsynchronized, since a diagnostic that needs a lock changes
+    /// what it is measuring.
+    static let watching = AudioOutput.verbose
+    private var errorMax: Double = 0
+    private var errorSum: Double = 0
+    private var errorCount = 0
+    private var missed = 0
+
+    /// How far each voice actually started from where the clock asked for it,
+    /// since the last read.
+    func takePlacement() -> (mean: Double, max: Double, count: Int,
+                             missed: Int, lead: Double, skipped: Int) {
+        defer { errorMax = 0; errorSum = 0; errorCount = 0; missed = 0 }
+        return (errorCount > 0 ? errorSum / Double(errorCount) : 0, errorMax,
+                errorCount, missed, scheduleLead, triggers.skipped)
     }
 
     /// Pick a slot for a lane: a free one, else the oldest of that lane's own
@@ -388,7 +538,7 @@ final class DrumSynth {
         return oldest
     }
 
-    private func start(_ t: Trigger) {
+    private func start(_ t: Trigger, offset: Int32) {
         // Choke: cut the tails this hit is meant to interrupt.
         if t.chokeMask != 0 {
             for v in 0..<Self.maxVoices where voices[v].active {
@@ -406,6 +556,7 @@ final class DrumSynth {
         var voice = Voice()
         voice.active = true
         voice.lane = t.lane
+        voice.startOffset = offset
         voice.age = 0
 
         voice.baseHz = max(12, min(sampleRate * 0.4, t.carrierHz))
@@ -535,8 +686,9 @@ extension Trigger {
     /// voice harder does. A velocity that only changes volume is the tell of a
     /// cheap drum machine, and on a modular voice it is a wasted opportunity —
     /// these patches have plenty of places for the energy to go.
-    init(voice: DrumVoice, lane: LaneSettings, velocity: Double) {
+    init(at: Double = 0, voice: DrumVoice, lane: LaneSettings, velocity: Double) {
         self.init()
+        self.at = at
         let p = lane.patch
         let v = max(0.05, min(1, velocity))
 

@@ -135,8 +135,13 @@ final class EventQueue<T> {
         os_unfair_lock_unlock(lock)
     }
 
+    /// Drains that found the lock held by a writer. The render thread will not
+    /// wait for one, so a contended push costs the hits in the queue a whole
+    /// buffer — worth counting rather than guessing at.
+    private(set) var skipped = 0
+
     func drain(_ body: (T) -> Void) {
-        guard os_unfair_lock_trylock(lock) else { return }
+        guard os_unfair_lock_trylock(lock) else { skipped += 1; return }
         for i in 0..<count { body(storage[i]) }
         count = 0
         os_unfair_lock_unlock(lock)

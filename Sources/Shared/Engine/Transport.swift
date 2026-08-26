@@ -64,6 +64,20 @@ final class Transport {
     /// happened to run — and the interval the source is armed with.
     private var tickAnchor: DispatchTime = .now()
     private var armedInterval: Double = 0
+
+    /// Clock diagnostics, kept only when someone is watching (`METER_DEBUG`).
+    ///
+    /// A stumble on a phone is a few milliseconds in a queue nobody can see, so
+    /// the clock keeps its own record: how late each tick's handler ran, how
+    /// often the grid fell far enough behind to be given up on, and how often
+    /// the glide re-armed the source.
+    private let watching = AudioOutput.verbose
+    private var lateMax: Double = 0
+    private var lateSum: Double = 0
+    private var lateCount = 0
+    private var resets = 0
+    private var rearms = 0
+    private var lastReport: DispatchTime = .now()
     private var timerResumed = false
     private var budget: Int = 14
     private var route: Route = .synth
@@ -231,6 +245,13 @@ final class Transport {
 
     private var tickSeconds: Double { 60.0 / bpm / Double(ticksPerQuarter) }
 
+    /// When this tick should be *heard*: where it belongs on the grid, plus the
+    /// lead the graph needs to place it on a sample rather than on whichever
+    /// buffer boundary noticed it. Both routes are told the same moment, so an
+    /// external instrument and the rack stay together whatever the output
+    /// latency happens to be.
+    private var moment: Double { Self.seconds(of: tickAnchor) + synth.scheduleLead }
+
     /// One step of the tempo glide, run on the clock itself so it moves with
     /// the music rather than with whatever rate the interface publishes at.
     ///
@@ -271,6 +292,7 @@ final class Transport {
     /// glide re-arms dozens of times a second and each one would fold its own
     /// scheduling latency in for good.
     private func arm(resettingPhase: Bool = false) {
+        if watching && isRunning && !resettingPhase { rearms += 1 }
         let interval = tickSeconds
         armedInterval = interval
         let source: DispatchSourceTimer
@@ -304,18 +326,27 @@ final class Transport {
 
     private func tick() {
         guard isRunning else { return }
+        let firedAt = DispatchTime.now()
         // Where this tick belonged, rather than when its handler got to run.
         tickAnchor = tickAnchor + armedInterval
+        if watching { record(late: Self.seconds(from: tickAnchor, to: firedAt)) }
         // If the grid has fallen a long way behind — the app suspended, the
         // queue stalled — there is nothing to be gained by playing the ticks
         // that were missed, so it starts again from here.
-        if tickAnchor + 0.25 < DispatchTime.now() { tickAnchor = .now() }
+        if tickAnchor + 0.25 < DispatchTime.now() {
+            if watching {
+                resets += 1
+                AudioOutput.note(String(format: "clock: grid %.0f ms behind, re-anchoring",
+                                        Self.seconds(from: tickAnchor, to: .now()) * 1000))
+            }
+            tickAnchor = .now()
+        }
         glideTempo(over: armedInterval)
 
         if tickInMeasure == 0 { beginMeasure() }
 
         // MIDI beat clock: 24 PPQN out of our 96.
-        if absTick % 4 == 0 { midi.clockTick() }
+        if absTick % 4 == 0 { midi.clockTick(at: moment) }
 
         // Anything scheduled for this exact tick, in the order it was queued.
         while let i = pendingFlams.firstIndex(where: { $0.at <= absTick }) {
@@ -324,7 +355,7 @@ final class Transport {
         }
         while let i = pendingOffs.firstIndex(where: { $0.at <= absTick }) {
             let item = pendingOffs.remove(at: i)
-            midi.noteOff(item.note)
+            midi.noteOff(item.note, at: moment)
         }
 
         for hit in measure.hits where hit.tick == tickInMeasure {
@@ -369,18 +400,49 @@ final class Transport {
 
     private func play(_ hit: Hit, at absTick: Int) {
         guard let lane = kit[hit.voice], !lane.muted else { return }
+        let when = moment
         if route != .midi {
-            synth.triggers.push(Trigger(voice: hit.voice, lane: lane,
+            synth.triggers.push(Trigger(at: when, voice: hit.voice, lane: lane,
                                         velocity: hit.velocity))
         }
         if route != .synth {
-            midi.noteOn(lane.midiNote, velocity: hit.velocity)
+            midi.noteOn(lane.midiNote, velocity: hit.velocity, at: when)
             // Drum modules want a real gate, not a zero-length one. Thirty
             // milliseconds is long enough for every module to latch and short
             // enough never to overlap the next step.
             let gate = max(2, Int((0.03 / tickSeconds).rounded()))
             pendingOffs.append((at: absTick + gate, note: lane.midiNote))
         }
+    }
+
+    /// Seconds between two dispatch times, signed. `DispatchTime` subtraction
+    /// is unsigned and would wrap on a tick that ran early.
+    private static func seconds(from a: DispatchTime, to b: DispatchTime) -> Double {
+        (Double(b.uptimeNanoseconds) - Double(a.uptimeNanoseconds)) / 1e9
+    }
+
+    /// Mach uptime seconds, the clock the engine timestamps its buffers with.
+    private static func seconds(of t: DispatchTime) -> Double {
+        Double(t.uptimeNanoseconds) / 1e9
+    }
+
+    /// Roll one tick's lateness into the running figures, and report once a
+    /// second. Reporting per tick would itself be the stall it is looking for.
+    private func record(late: Double) {
+        lateMax = max(lateMax, late)
+        lateSum += late
+        lateCount += 1
+        guard Self.seconds(from: lastReport, to: .now()) >= 1 else { return }
+        lastReport = .now()
+        AudioOutput.note(String(format:
+            "clock: %d ticks, late mean %.2f ms max %.2f ms, %d re-arms, %d re-anchors, %.2f→%.2f bpm",
+            lateCount, lateSum / Double(max(1, lateCount)) * 1000, lateMax * 1000,
+            rearms, resets, bpm, targetBpm))
+        let v = synth.takePlacement()
+        AudioOutput.note(String(format:
+            "voices: %d starts, placement mean %.3f ms max %.3f ms, %d missed, lead %.1f ms, %d contended drains",
+            v.count, v.mean * 1000, v.max * 1000, v.missed, v.lead * 1000, v.skipped))
+        lateMax = 0; lateSum = 0; lateCount = 0; rearms = 0; resets = 0
     }
 
     private func allNotesOff() {

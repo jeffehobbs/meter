@@ -1,5 +1,6 @@
-import Foundation
+import AVFoundation
 import CoreMIDI
+import Foundation
 
 /// A MIDI destination Meter can play into.
 struct MIDIDestinationInfo: Identifiable, Hashable {
@@ -100,13 +101,13 @@ final class MIDIOut {
 
     // MARK: - Sending
 
-    func noteOn(_ note: Int, velocity: Double) {
+    func noteOn(_ note: Int, velocity: Double, at time: Double = 0) {
         let v = UInt8(max(1, min(127, Int((velocity * 127).rounded()))))
-        channelVoice(status: 0x9, UInt8(clamping: note), v)
+        channelVoice(status: 0x9, UInt8(clamping: note), v, at: time)
     }
 
-    func noteOff(_ note: Int) {
-        channelVoice(status: 0x8, UInt8(clamping: note), 0)
+    func noteOff(_ note: Int, at time: Double = 0) {
+        channelVoice(status: 0x8, UInt8(clamping: note), 0, at: time)
     }
 
     /// CC 123 on the percussion channel, plus a stop, so nothing is left
@@ -118,33 +119,42 @@ final class MIDIOut {
 
     // MARK: - Transport messages
 
-    func clockTick() { guard sendsClock else { return }; realtime(0xF8) }
+    func clockTick(at time: Double = 0) { guard sendsClock else { return }; realtime(0xF8, at: time) }
     func start()     { guard sendsClock else { return }; realtime(0xFA) }
     func resume()    { guard sendsClock else { return }; realtime(0xFB) }
     func stop()      { guard sendsClock else { return }; realtime(0xFC) }
 
-    private func channelVoice(status: UInt8, _ data1: UInt8, _ data2: UInt8) {
+    private func channelVoice(status: UInt8, _ data1: UInt8, _ data2: UInt8,
+                              at time: Double = 0) {
         // UMP MIDI 1.0 channel voice: [mt:4=2][group:4][status:4][channel:4][d1:8][d2:8]
         let word = (UInt32(0x2) << 28)
             | (UInt32(status & 0xF) << 20)
             | (UInt32(channel & 0xF) << 16)
             | (UInt32(data1 & 0x7F) << 8)
             | UInt32(data2 & 0x7F)
-        send(word)
+        send(word, at: time)
     }
 
-    private func realtime(_ status: UInt8) {
+    private func realtime(_ status: UInt8, at time: Double = 0) {
         // UMP system real time: [mt:4=1][group:4][status:8][0:8][0:8]
         let word = (UInt32(0x1) << 28) | (UInt32(status) << 16)
-        send(word)
+        send(word, at: time)
     }
 
-    private func send(_ word: UInt32) {
+    /// `time` is mach uptime seconds — the moment the rack will be heard at,
+    /// which is a little after the moment the clock decided on. Zero means now.
+    ///
+    /// The two routes have to be told the same time or they drift apart by the
+    /// output latency: a hit handed to the graph is heard when the buffer
+    /// carrying it reaches the ears, and an external instrument given the same
+    /// hit "now" has already played it by then.
+    private func send(_ word: UInt32, at time: Double = 0) {
         guard virtualSource != 0 || selectedEndpoint != 0 else { return }
         var list = MIDIEventList()
         let packet = MIDIEventListInit(&list, ._1_0)
         var words = [word]
-        _ = MIDIEventListAdd(&list, 1_024, packet, 0, 1, &words)
+        let stamp: MIDITimeStamp = time > 0 ? AVAudioTime.hostTime(forSeconds: time) : 0
+        _ = MIDIEventListAdd(&list, 1_024, packet, stamp, 1, &words)
         // Publish to anyone subscribed to "Meter Out"…
         if virtualSource != 0 { MIDIReceivedEventList(virtualSource, &list) }
         // …and to the chosen destination, if there is one.
